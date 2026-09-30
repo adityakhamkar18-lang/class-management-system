@@ -1,84 +1,84 @@
 <?php
 
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
 /*
 |--------------------------------------------------------------------------
-| Database Configuration
+| CLASS MANAGEMENT SYSTEM
+| DATABASE CONFIGURATION
 |--------------------------------------------------------------------------
+| 
+| Local:
+|   Uses XAMPP defaults.
 |
-| Local XAMPP:
-|   DB_HOST=localhost
-|   DB_USER=root
-|   DB_PASS=
-|   DB_NAME=class_management
-|
-| Production:
-|   These values can be supplied through environment variables.
+| Hosting:
+|   Uses environment variables supplied by the hosting provider.
 |
 |--------------------------------------------------------------------------
 */
 
-/*
-|--------------------------------------------------------------------------
-| Database Credentials
-|--------------------------------------------------------------------------
-*/
+// ------------------------------------------------------------
+// Get database settings from environment variables
+// ------------------------------------------------------------
 
-$host = getenv("DB_HOST") ?: "localhost";
+$db_host = getenv("DB_HOST");
+$db_user = getenv("DB_USER");
+$db_pass = getenv("DB_PASSWORD");
+$db_name = getenv("DB_NAME");
+$db_port = getenv("DB_PORT");
 
-$username = getenv("DB_USER") ?: "root";
+// ------------------------------------------------------------
+// Local fallback
+// ------------------------------------------------------------
 
-$password = getenv("DB_PASS") ?: "";
-
-$database = getenv("DB_NAME") ?: "class_management";
-
-/*
-|--------------------------------------------------------------------------
-| Create Database Connection
-|--------------------------------------------------------------------------
-*/
-
-$conn = mysqli_connect(
-    $host,
-    $username,
-    $password,
-    $database
-);
-
-/*
-|--------------------------------------------------------------------------
-| Check Database Connection
-|--------------------------------------------------------------------------
-|
-| Do not expose detailed database errors to users.
-|
-*/
-
-if (!$conn) {
-
-    error_log(
-        "Database connection failed: " .
-        mysqli_connect_error()
-    );
-
-    die(
-        "Unable to connect to the database. Please try again later."
-    );
-
+if (empty($db_host)) {
+    $db_host = "localhost";
 }
 
-/*
-|--------------------------------------------------------------------------
-| Set UTF-8 Character Encoding
-|--------------------------------------------------------------------------
-*/
+if (empty($db_user)) {
+    $db_user = "root";
+}
 
-if (!mysqli_set_charset($conn, "utf8mb4")) {
+if ($db_pass === false) {
+    $db_pass = "";
+}
 
-    error_log(
-        "Failed to set database character encoding: " .
-        mysqli_error($conn)
+if (empty($db_name)) {
+    $db_name = "class_management";
+}
+
+if (empty($db_port)) {
+    $db_port = 3306;
+}
+
+// ------------------------------------------------------------
+// Connect to database
+// ------------------------------------------------------------
+
+try {
+
+    $conn = mysqli_connect(
+        $db_host,
+        $db_user,
+        $db_pass,
+        $db_name,
+        (int)$db_port
     );
 
+    // UTF-8 support
+    mysqli_set_charset($conn, "utf8mb4");
+
+} catch (mysqli_sql_exception $e) {
+
+    // Log technical error privately
+    error_log(
+        "Class Management System DB Error: " . $e->getMessage()
+    );
+
+    // Safe message for visitors
+    die(
+        "Database connection failed. Please check the database configuration."
+    );
 }
 
 ?>
