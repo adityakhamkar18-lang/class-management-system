@@ -1,264 +1,397 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+require_once __DIR__ . '/config.php';
 
-// ----------------------------------------------------
-// Initialize variables
-// ----------------------------------------------------
-$error = "";
+/*
+|--------------------------------------------------------------------------
+| Helper
+|--------------------------------------------------------------------------
+*/
 
-$selected_student_id = "";
-$selected_subject = "";
-$entered_marks = "";
+function e(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
 
-// ----------------------------------------------------
-// Process form submission
-// ----------------------------------------------------
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
 
-    // Get and clean form data
-    $selected_student_id = isset($_POST["student_id"])
-        ? intval($_POST["student_id"])
-        : 0;
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 
-    $selected_subject = isset($_POST["subject_name"])
-        ? trim($_POST["subject_name"])
-        : "";
+$csrf_token = $_SESSION['csrf_token'];
 
-    $entered_marks = isset($_POST["marks"])
-        ? trim($_POST["marks"])
-        : "";
+/*
+|--------------------------------------------------------------------------
+| Form Variables
+|--------------------------------------------------------------------------
+*/
 
-    // ------------------------------------------------
-    // Validate Student
-    // ------------------------------------------------
-    if ($selected_student_id <= 0) {
+$error = '';
 
-        $error = "Please select a valid student.";
+$selected_student_id = '';
+$selected_subject = '';
+$entered_marks = '';
 
-    }
+/*
+|--------------------------------------------------------------------------
+| Process Form
+|--------------------------------------------------------------------------
+*/
 
-    // ------------------------------------------------
-    // Validate Subject
-    // ------------------------------------------------
-    elseif ($selected_subject === "") {
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-        $error = "Please select a subject.";
+    /*
+    |--------------------------------------------------------------------------
+    | CSRF Verification
+    |--------------------------------------------------------------------------
+    */
 
-    }
+    $submitted_token = (string) ($_POST['csrf_token'] ?? '');
 
-    // ------------------------------------------------
-    // Validate Marks
-    // ------------------------------------------------
-    elseif ($entered_marks === "" || !is_numeric($entered_marks)) {
+    if (
+        $submitted_token === '' ||
+        !hash_equals($csrf_token, $submitted_token)
+    ) {
+        $error = 'Invalid form request. Please refresh the page and try again.';
+    } else {
 
-        $error = "Please enter valid marks.";
+        /*
+        |--------------------------------------------------------------------------
+        | Read Form Data
+        |--------------------------------------------------------------------------
+        */
 
-    }
-
-    elseif ($entered_marks < 0 || $entered_marks > 100) {
-
-        $error = "Marks must be between 0 and 100.";
-
-    }
-
-    else {
-
-        $marks = intval($entered_marks);
-
-        // ------------------------------------------------
-        // Get Student Name using Student ID
-        // ------------------------------------------------
-        $student_stmt = mysqli_prepare(
-            $conn,
-            "SELECT name FROM students WHERE id = ? LIMIT 1"
+        $selected_student_id = filter_var(
+            $_POST['student_id'] ?? '',
+            FILTER_VALIDATE_INT
         );
 
-        if (!$student_stmt) {
+        if ($selected_student_id === false || $selected_student_id <= 0) {
+            $selected_student_id = '';
+        }
 
-            $error = "Database error. Please try again.";
+        $selected_subject = trim(
+            (string) ($_POST['subject_name'] ?? '')
+        );
+
+        $entered_marks = trim(
+            (string) ($_POST['marks'] ?? '')
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Student
+        |--------------------------------------------------------------------------
+        */
+
+        if ($selected_student_id === '') {
+
+            $error = 'Please select a valid student.';
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Subject
+        |--------------------------------------------------------------------------
+        */
+
+        } elseif ($selected_subject === '') {
+
+            $error = 'Please select a subject.';
+
+        } elseif (strlen($selected_subject) > 100) {
+
+            $error = 'Invalid subject selected.';
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Marks
+        |--------------------------------------------------------------------------
+        */
+
+        } elseif ($entered_marks === '') {
+
+            $error = 'Please enter marks.';
+
+        } elseif (!preg_match('/^\d+$/', $entered_marks)) {
+
+            $error = 'Marks must be a whole number between 0 and 100.';
 
         } else {
 
-            mysqli_stmt_bind_param(
-                $student_stmt,
-                "i",
-                $selected_student_id
-            );
+            $marks = (int) $entered_marks;
 
-            mysqli_stmt_execute($student_stmt);
+            if ($marks < 0 || $marks > 100) {
 
-            $student_result = mysqli_stmt_get_result($student_stmt);
-
-            if (!$student_result || mysqli_num_rows($student_result) === 0) {
-
-                $error = "Selected student was not found.";
+                $error = 'Marks must be between 0 and 100.';
 
             } else {
 
-                $student = mysqli_fetch_assoc($student_result);
+                try {
 
-                $student_name = $student["name"];
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Verify Student and Get Current Name
+                    |--------------------------------------------------------------------------
+                    */
 
-                // ------------------------------------------------
-                // Verify that selected subject exists
-                // ------------------------------------------------
-                $subject_stmt = mysqli_prepare(
-                    $conn,
-                    "SELECT subject_name
-                     FROM subjects
-                     WHERE subject_name = ?
-                     LIMIT 1"
-                );
-
-                if (!$subject_stmt) {
-
-                    $error = "Database error. Please try again.";
-
-                } else {
-
-                    mysqli_stmt_bind_param(
-                        $subject_stmt,
-                        "s",
-                        $selected_subject
+                    $student_stmt = $conn->prepare(
+                        "SELECT name
+                         FROM students
+                         WHERE id = ?
+                         LIMIT 1"
                     );
 
-                    mysqli_stmt_execute($subject_stmt);
+                    $student_stmt->bind_param(
+                        'i',
+                        $selected_student_id
+                    );
 
-                    $subject_result = mysqli_stmt_get_result($subject_stmt);
+                    $student_stmt->execute();
+                    $student_stmt->store_result();
 
-                    if (
-                        !$subject_result ||
-                        mysqli_num_rows($subject_result) === 0
-                    ) {
+                    if ($student_stmt->num_rows === 0) {
 
-                        $error = "Selected subject was not found.";
+                        $error = 'Selected student was not found.';
+
+                        $student_stmt->close();
 
                     } else {
 
-                        // ------------------------------------------------
-                        // Check for duplicate marks
-                        // ------------------------------------------------
-                        $duplicate_stmt = mysqli_prepare(
-                            $conn,
-                            "SELECT id
-                             FROM marks
-                             WHERE student_id = ?
-                             AND subject_name = ?
+                        $student_stmt->bind_result($student_name);
+                        $student_stmt->fetch();
+                        $student_stmt->close();
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Verify Subject
+                        |--------------------------------------------------------------------------
+                        */
+
+                        $subject_stmt = $conn->prepare(
+                            "SELECT subject_name
+                             FROM subjects
+                             WHERE subject_name = ?
                              LIMIT 1"
                         );
 
-                        if (!$duplicate_stmt) {
+                        $subject_stmt->bind_param(
+                            's',
+                            $selected_subject
+                        );
 
-                            $error = "Database error. Please try again.";
+                        $subject_stmt->execute();
+                        $subject_stmt->store_result();
+
+                        if ($subject_stmt->num_rows === 0) {
+
+                            $error = 'Selected subject was not found.';
+
+                            $subject_stmt->close();
 
                         } else {
 
-                            mysqli_stmt_bind_param(
-                                $duplicate_stmt,
-                                "is",
+                            $subject_stmt->close();
+
+                            /*
+                            |--------------------------------------------------------------------------
+                            | Check Duplicate Marks
+                            |--------------------------------------------------------------------------
+                            */
+
+                            $duplicate_stmt = $conn->prepare(
+                                "SELECT id
+                                 FROM marks
+                                 WHERE student_id = ?
+                                   AND subject_name = ?
+                                 LIMIT 1"
+                            );
+
+                            $duplicate_stmt->bind_param(
+                                'is',
                                 $selected_student_id,
                                 $selected_subject
                             );
 
-                            mysqli_stmt_execute($duplicate_stmt);
+                            $duplicate_stmt->execute();
+                            $duplicate_stmt->store_result();
 
-                            $duplicate_result =
-                                mysqli_stmt_get_result($duplicate_stmt);
-
-                            if (
-                                $duplicate_result &&
-                                mysqli_num_rows($duplicate_result) > 0
-                            ) {
+                            if ($duplicate_stmt->num_rows > 0) {
 
                                 $error =
-                                    "Marks for this student and subject already exist.";
+                                    'Marks for this student and subject already exist.';
+
+                                $duplicate_stmt->close();
 
                             } else {
 
-                                // ------------------------------------------------
-                                // Insert Marks
-                                // ------------------------------------------------
-                                $insert_stmt = mysqli_prepare(
-                                    $conn,
+                                $duplicate_stmt->close();
+
+                                /*
+                                |--------------------------------------------------------------------------
+                                | Insert Marks
+                                |--------------------------------------------------------------------------
+                                */
+
+                                $insert_stmt = $conn->prepare(
                                     "INSERT INTO marks
-                                    (student_id, student_name, subject_name, marks)
+                                    (
+                                        student_id,
+                                        student_name,
+                                        subject_name,
+                                        marks
+                                    )
                                     VALUES (?, ?, ?, ?)"
                                 );
 
-                                if (!$insert_stmt) {
+                                $insert_stmt->bind_param(
+                                    'issi',
+                                    $selected_student_id,
+                                    $student_name,
+                                    $selected_subject,
+                                    $marks
+                                );
 
-                                    $error =
-                                        "Unable to prepare database request.";
+                                $insert_stmt->execute();
 
-                                } else {
+                                $insert_stmt->close();
 
-                                    mysqli_stmt_bind_param(
-                                        $insert_stmt,
-                                        "issi",
-                                        $selected_student_id,
-                                        $student_name,
-                                        $selected_subject,
-                                        $marks
-                                    );
+                                /*
+                                |--------------------------------------------------------------------------
+                                | Success - Post/Redirect/Get
+                                |--------------------------------------------------------------------------
+                                */
 
-                                    if (mysqli_stmt_execute($insert_stmt)) {
+                                $_SESSION['mark_add_success'] =
+                                    'Marks added successfully.';
 
-                                        header("Location: marks.php");
-                                        exit();
+                                $_SESSION['csrf_token'] =
+                                    bin2hex(random_bytes(32));
 
-                                    } else {
-
-                                        $error =
-                                            "Unable to save marks. Please try again.";
-
-                                    }
-
-                                    mysqli_stmt_close($insert_stmt);
-                                }
+                                header('Location: marks.php');
+                                exit;
                             }
-
-                            mysqli_stmt_close($duplicate_stmt);
                         }
                     }
 
-                    mysqli_stmt_close($subject_stmt);
+                } catch (mysqli_sql_exception $e) {
+
+                    error_log(
+                        'Add marks database error: ' . $e->getMessage()
+                    );
+
+                    if ((int) $e->getCode() === 1062) {
+
+                        $error =
+                            'Marks for this student and subject already exist.';
+
+                    } else {
+
+                        $error =
+                            'Unable to save marks right now. Please try again later.';
+                    }
                 }
             }
-
-            mysqli_stmt_close($student_stmt);
         }
     }
 }
 
-// ----------------------------------------------------
-// Fetch students
-// ----------------------------------------------------
-$students = mysqli_query(
-    $conn,
-    "SELECT id, name
-     FROM students
-     ORDER BY name ASC"
-);
+/*
+|--------------------------------------------------------------------------
+| Fetch Students and Subjects
+|--------------------------------------------------------------------------
+*/
 
-// ----------------------------------------------------
-// Fetch subjects
-// ----------------------------------------------------
-$subjects = mysqli_query(
-    $conn,
-    "SELECT subject_name
-     FROM subjects
-     ORDER BY subject_name ASC"
-);
+$students = [];
+$subjects = [];
+
+$students_error = '';
+$subjects_error = '';
+
+try {
+
+    $student_list_stmt = $conn->prepare(
+        "SELECT id, name
+         FROM students
+         ORDER BY name ASC"
+    );
+
+    $student_list_stmt->execute();
+    $student_list_stmt->store_result();
+
+    $student_list_stmt->bind_result(
+        $student_id,
+        $student_name
+    );
+
+    while ($student_list_stmt->fetch()) {
+
+        $students[] = [
+            'id' => (int) $student_id,
+            'name' => (string) $student_name
+        ];
+    }
+
+    $student_list_stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Add marks student list error: ' . $e->getMessage()
+    );
+
+    $students_error =
+        'Unable to load students right now.';
+}
+
+try {
+
+    $subject_list_stmt = $conn->prepare(
+        "SELECT subject_name
+         FROM subjects
+         ORDER BY subject_name ASC"
+    );
+
+    $subject_list_stmt->execute();
+    $subject_list_stmt->store_result();
+
+    $subject_list_stmt->bind_result($subject_name);
+
+    while ($subject_list_stmt->fetch()) {
+
+        $subjects[] = (string) $subject_name;
+    }
+
+    $subject_list_stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Add marks subject list error: ' . $e->getMessage()
+    );
+
+    $subjects_error =
+        'Unable to load subjects right now.';
+}
 
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 
@@ -271,53 +404,151 @@ $subjects = mysqli_query(
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Add Marks - Class Management System</title>
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <title>Add Marks | Class Management System</title>
 
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
         rel="stylesheet"
     >
 
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+        rel="stylesheet"
+    >
+
     <style>
 
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            background: #f5f7fb;
+            margin: 0;
+            background: #f4f6f9;
+            font-family: Arial, Helvetica, sans-serif;
+            color: #212529;
             min-height: 100vh;
         }
 
+        .page-wrapper {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 30px 15px;
+        }
+
         .form-card {
-            max-width: 600px;
-            margin: 50px auto;
+            width: 100%;
+            max-width: 620px;
             background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
             padding: 35px;
-            border-radius: 15px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.07);
+        }
+
+        .form-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .form-icon {
+            width: 58px;
+            height: 58px;
+            margin: 0 auto 15px;
+            border-radius: 14px;
+            background: #eff6ff;
+            color: #2563eb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 27px;
         }
 
         .page-title {
-            font-weight: 600;
-            color: #212529;
+            margin: 0;
+            color: #111827;
+            font-size: 27px;
+            font-weight: 700;
+        }
+
+        .page-subtitle {
+            margin: 7px 0 0;
+            color: #6b7280;
+            font-size: 14px;
         }
 
         .form-label {
-            font-weight: 500;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 8px;
         }
 
         .form-control,
         .form-select {
-            padding: 12px;
+            min-height: 46px;
             border-radius: 8px;
+            border-color: #d1d5db;
         }
 
         .form-control:focus,
         .form-select:focus {
-            box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.15);
+            border-color: #2563eb;
+            box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.12);
+        }
+
+        .form-text {
+            color: #6b7280;
         }
 
         .button-group {
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
+            margin-top: 25px;
+        }
+
+        .button-group .btn {
+            min-height: 45px;
+        }
+
+        .empty-warning {
+            background: #fff7ed;
+            color: #9a3412;
+            border: 1px solid #fed7aa;
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 13px;
+            margin-top: 8px;
+        }
+
+        @media (max-width: 576px) {
+
+            .page-wrapper {
+                padding: 15px;
+            }
+
+            .form-card {
+                padding: 25px 20px;
+            }
+
+            .page-title {
+                font-size: 23px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .button-group .btn {
+                width: 100%;
+            }
         }
 
     </style>
@@ -326,29 +557,77 @@ $subjects = mysqli_query(
 
 <body>
 
-<div class="container">
+<div class="page-wrapper">
 
     <div class="form-card">
 
-        <h2 class="page-title mb-4">
-            Add Marks
-        </h2>
+        <div class="form-header">
 
-        <?php if ($error !== "") { ?>
+            <div class="form-icon">
+                <i class="bi bi-bar-chart-fill"></i>
+            </div>
+
+            <h1 class="page-title">
+                Add Marks
+            </h1>
+
+            <p class="page-subtitle">
+                Add academic marks for a student and subject.
+            </p>
+
+        </div>
+
+        <?php if ($error !== ''): ?>
 
             <div
                 class="alert alert-danger"
                 role="alert"
             >
-                <?php echo htmlspecialchars($error); ?>
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <?php echo e($error); ?>
             </div>
 
-        <?php } ?>
+        <?php endif; ?>
 
-        <form method="POST" action="">
+        <?php if ($students_error !== ''): ?>
+
+            <div
+                class="alert alert-warning"
+                role="alert"
+            >
+                <i class="bi bi-people-fill me-2"></i>
+                <?php echo e($students_error); ?>
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($subjects_error !== ''): ?>
+
+            <div
+                class="alert alert-warning"
+                role="alert"
+            >
+                <i class="bi bi-book-fill me-2"></i>
+                <?php echo e($subjects_error); ?>
+            </div>
+
+        <?php endif; ?>
+
+        <form
+            method="POST"
+            action=""
+            autocomplete="off"
+        >
+
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?php echo e($csrf_token); ?>"
+            >
 
             <!-- Student -->
-            <div class="mb-3">
+
+            <div class="mb-4">
 
                 <label
                     for="student_id"
@@ -368,51 +647,38 @@ $subjects = mysqli_query(
                         Select Student
                     </option>
 
-                    <?php
-                    if ($students && mysqli_num_rows($students) > 0) {
-
-                        while ($row = mysqli_fetch_assoc($students)) {
-                    ?>
+                    <?php foreach ($students as $student): ?>
 
                         <option
-                            value="<?php echo (int)$row["id"]; ?>"
+                            value="<?php echo (int) $student['id']; ?>"
                             <?php
-                            if (
-                                $selected_student_id ==
-                                $row["id"]
-                            ) {
-                                echo "selected";
-                            }
+                            echo (
+                                (string) $selected_student_id ===
+                                (string) $student['id']
+                            ) ? 'selected' : '';
                             ?>
                         >
-                            <?php
-                            echo htmlspecialchars(
-                                $row["name"],
-                                ENT_QUOTES,
-                                "UTF-8"
-                            );
-                            ?>
+                            <?php echo e($student['name']); ?>
                         </option>
 
-                    <?php
-                        }
-
-                    } else {
-                    ?>
-
-                        <option value="" disabled>
-                            No students available
-                        </option>
-
-                    <?php } ?>
+                    <?php endforeach; ?>
 
                 </select>
 
+                <?php if (count($students) === 0 && $students_error === ''): ?>
+
+                    <div class="empty-warning">
+                        <i class="bi bi-info-circle me-1"></i>
+                        No students are available. Add a student first.
+                    </div>
+
+                <?php endif; ?>
+
             </div>
 
-
             <!-- Subject -->
-            <div class="mb-3">
+
+            <div class="mb-4">
 
                 <label
                     for="subject_name"
@@ -432,56 +698,36 @@ $subjects = mysqli_query(
                         Select Subject
                     </option>
 
-                    <?php
-                    if ($subjects && mysqli_num_rows($subjects) > 0) {
-
-                        while ($row = mysqli_fetch_assoc($subjects)) {
-                    ?>
+                    <?php foreach ($subjects as $subject): ?>
 
                         <option
-                            value="<?php
-                                echo htmlspecialchars(
-                                    $row["subject_name"],
-                                    ENT_QUOTES,
-                                    "UTF-8"
-                                );
-                            ?>"
+                            value="<?php echo e($subject); ?>"
                             <?php
-                            if (
-                                $selected_subject ===
-                                $row["subject_name"]
-                            ) {
-                                echo "selected";
-                            }
+                            echo (
+                                $selected_subject === $subject
+                            ) ? 'selected' : '';
                             ?>
                         >
-                            <?php
-                            echo htmlspecialchars(
-                                $row["subject_name"],
-                                ENT_QUOTES,
-                                "UTF-8"
-                            );
-                            ?>
+                            <?php echo e($subject); ?>
                         </option>
 
-                    <?php
-                        }
-
-                    } else {
-                    ?>
-
-                        <option value="" disabled>
-                            No subjects available
-                        </option>
-
-                    <?php } ?>
+                    <?php endforeach; ?>
 
                 </select>
 
+                <?php if (count($subjects) === 0 && $subjects_error === ''): ?>
+
+                    <div class="empty-warning">
+                        <i class="bi bi-info-circle me-1"></i>
+                        No subjects are available. Add a subject first.
+                    </div>
+
+                <?php endif; ?>
+
             </div>
 
-
             <!-- Marks -->
+
             <div class="mb-4">
 
                 <label
@@ -499,40 +745,43 @@ $subjects = mysqli_query(
                     min="0"
                     max="100"
                     step="1"
-                    value="<?php
-                        echo htmlspecialchars(
-                            $entered_marks,
-                            ENT_QUOTES,
-                            "UTF-8"
-                        );
-                    ?>"
+                    inputmode="numeric"
+                    value="<?php echo e($entered_marks); ?>"
                     placeholder="Enter marks"
                     required
                 >
 
-                <div class="form-text">
-                    Enter marks between 0 and 100.
+                <div class="form-text mt-2">
+                    Enter a whole number between 0 and 100.
                 </div>
 
             </div>
 
-
             <!-- Buttons -->
+
             <div class="button-group">
 
                 <button
                     type="submit"
                     name="save"
-                    class="btn btn-success px-4"
+                    class="btn btn-primary px-4"
+                    <?php
+                    echo (
+                        count($students) === 0 ||
+                        count($subjects) === 0
+                    ) ? 'disabled' : '';
+                    ?>
                 >
+                    <i class="bi bi-check-lg me-1"></i>
                     Save Marks
                 </button>
 
                 <a
                     href="marks.php"
-                    class="btn btn-secondary px-4"
+                    class="btn btn-outline-secondary px-4"
                 >
-                    Back
+                    <i class="bi bi-arrow-left me-1"></i>
+                    Back to Marks
                 </a>
 
             </div>

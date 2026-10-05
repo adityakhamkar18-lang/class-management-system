@@ -1,84 +1,88 @@
 <?php
 
-mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+declare(strict_types=1);
 
 /*
 |--------------------------------------------------------------------------
-| CLASS MANAGEMENT SYSTEM
-| DATABASE CONFIGURATION
+| Class Management System - Database Configuration
 |--------------------------------------------------------------------------
-| 
-| Local:
-|   Uses XAMPP defaults.
+| Supports:
+|   - Local XAMPP / localhost
+|   - Production hosting using environment variables
 |
-| Hosting:
-|   Uses environment variables supplied by the hosting provider.
-|
+| Production environment variables:
+|   DB_HOST
+|   DB_USER
+|   DB_PASS
+|   DB_NAME
+|   DB_PORT   (optional - defaults to 3306)
 |--------------------------------------------------------------------------
 */
 
-// ------------------------------------------------------------
-// Get database settings from environment variables
-// ------------------------------------------------------------
+// Enable MySQLi exceptions for proper error handling.
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-$db_host = getenv("DB_HOST");
-$db_user = getenv("DB_USER");
-$db_pass = getenv("DB_PASSWORD");
-$db_name = getenv("DB_NAME");
-$db_port = getenv("DB_PORT");
 
-// ------------------------------------------------------------
-// Local fallback
-// ------------------------------------------------------------
+// -------------------------------------------------------------------------
+// Database configuration
+// -------------------------------------------------------------------------
 
-if (empty($db_host)) {
-    $db_host = "localhost";
+$db_host = getenv('DB_HOST') ?: 'localhost';
+$db_user = getenv('DB_USER') ?: 'root';
+$db_pass = getenv('DB_PASS') ?: '';
+$db_name = getenv('DB_NAME') ?: 'class_management';
+
+$db_port_raw = getenv('DB_PORT');
+$db_port = ($db_port_raw !== false && $db_port_raw !== '')
+    ? (int) $db_port_raw
+    : 3306;
+
+
+// -------------------------------------------------------------------------
+// Validate configuration
+// -------------------------------------------------------------------------
+
+if (
+    $db_host === '' ||
+    $db_user === '' ||
+    $db_name === '' ||
+    $db_port <= 0
+) {
+    error_log('Database configuration is incomplete or invalid.');
+
+    http_response_code(500);
+
+    exit('Database configuration is incomplete.');
 }
 
-if (empty($db_user)) {
-    $db_user = "root";
-}
 
-if ($db_pass === false) {
-    $db_pass = "";
-}
-
-if (empty($db_name)) {
-    $db_name = "class_management";
-}
-
-if (empty($db_port)) {
-    $db_port = 3306;
-}
-
-// ------------------------------------------------------------
-// Connect to database
-// ------------------------------------------------------------
+// -------------------------------------------------------------------------
+// Create database connection
+// -------------------------------------------------------------------------
 
 try {
 
-    $conn = mysqli_connect(
+    $conn = new mysqli(
         $db_host,
         $db_user,
         $db_pass,
         $db_name,
-        (int)$db_port
+        $db_port
     );
 
-    // UTF-8 support
-    mysqli_set_charset($conn, "utf8mb4");
+    // Use UTF-8 for the entire application.
+    $conn->set_charset('utf8mb4');
 
 } catch (mysqli_sql_exception $e) {
 
-    // Log technical error privately
+    // Never expose database credentials or technical errors to visitors.
     error_log(
-        "Class Management System DB Error: " . $e->getMessage()
+        'Class Management System - Database connection failed: ' .
+        $e->getMessage()
     );
 
-    // Safe message for visitors
-    die(
-        "Database connection failed. Please check the database configuration."
-    );
+    http_response_code(500);
+
+    exit('Unable to connect to the database. Please try again later.');
 }
-
 ?>

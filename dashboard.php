@@ -1,106 +1,216 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
 
-$admin_name = htmlspecialchars($_SESSION['admin'], ENT_QUOTES, 'UTF-8');
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
+function e(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
 
-/* ================================
-   COUNT FUNCTION
-================================ */
-function getCount($conn, $table)
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
+$admin_name = (string) $_SESSION['admin'];
+
+/*
+|--------------------------------------------------------------------------
+| Dashboard Defaults
+|--------------------------------------------------------------------------
+*/
+$total_students = 0;
+$total_teachers = 0;
+$total_subjects = 0;
+$total_attendance = 0;
+$total_marks = 0;
+
+$present = 0;
+$absent = 0;
+$attendance_percentage = 0.0;
+
+$subjects_labels = [];
+$subjects_marks = [];
+
+$database_error = '';
+
+/*
+|--------------------------------------------------------------------------
+| Get Table Count
+|--------------------------------------------------------------------------
+*/
+function getCount(mysqli $conn, string $table): int
 {
     $allowed_tables = [
-        "students",
-        "teachers",
-        "subjects",
-        "attendance",
-        "marks"
+        'students',
+        'teachers',
+        'subjects',
+        'attendance',
+        'marks'
     ];
 
     if (!in_array($table, $allowed_tables, true)) {
         return 0;
     }
 
-    $result = mysqli_query($conn, "SELECT COUNT(*) AS total FROM `$table`");
+    $sql = "SELECT COUNT(*) FROM `$table`";
 
-    if ($result) {
-        $row = mysqli_fetch_assoc($result);
-        return (int)$row['total'];
+    $stmt = $conn->prepare($sql);
+    $stmt->execute();
+
+    $stmt->bind_result($count);
+    $stmt->fetch();
+    $stmt->close();
+
+    return (int) $count;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Load Dashboard Data
+|--------------------------------------------------------------------------
+*/
+try {
+
+    /*
+    |--------------------------------------------------------------------------
+    | Main Counts
+    |--------------------------------------------------------------------------
+    */
+    $total_students = getCount($conn, 'students');
+    $total_teachers = getCount($conn, 'teachers');
+    $total_subjects = getCount($conn, 'subjects');
+    $total_attendance = getCount($conn, 'attendance');
+    $total_marks = getCount($conn, 'marks');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Attendance Statistics
+    |--------------------------------------------------------------------------
+    */
+    $attendance_stmt = $conn->prepare(
+        "SELECT
+            COALESCE(SUM(status = 'Present'), 0) AS present,
+            COALESCE(SUM(status = 'Absent'), 0) AS absent
+         FROM attendance"
+    );
+
+    $attendance_stmt->execute();
+
+    $attendance_stmt->bind_result(
+        $present,
+        $absent
+    );
+
+    $attendance_stmt->fetch();
+    $attendance_stmt->close();
+
+    $present = (int) $present;
+    $absent = (int) $absent;
+
+    $attendance_total = $present + $absent;
+
+    if ($attendance_total > 0) {
+        $attendance_percentage = round(
+            ($present / $attendance_total) * 100,
+            1
+        );
     }
 
-    return 0;
-}
+    /*
+    |--------------------------------------------------------------------------
+    | Subject-Wise Average Marks
+    |--------------------------------------------------------------------------
+    */
+    $marks_stmt = $conn->prepare(
+        "SELECT
+            subject_name,
+            ROUND(AVG(marks), 2) AS average_marks
+         FROM marks
+         GROUP BY subject_name
+         ORDER BY subject_name ASC"
+    );
 
-/* ================================
-   MAIN COUNTS
-================================ */
-$total_students   = getCount($conn, "students");
-$total_teachers   = getCount($conn, "teachers");
-$total_subjects   = getCount($conn, "subjects");
-$total_attendance = getCount($conn, "attendance");
-$total_marks      = getCount($conn, "marks");
+    $marks_stmt->execute();
 
-/* ================================
-   ATTENDANCE
-================================ */
-$present = 0;
-$absent = 0;
+    $marks_stmt->bind_result(
+        $subject_name,
+        $average_marks
+    );
 
-$attendance_query = mysqli_query(
-    $conn,
-    "SELECT
-        SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) AS present,
-        SUM(CASE WHEN status = 'Absent' THEN 1 ELSE 0 END) AS absent
-     FROM attendance"
-);
+    while ($marks_stmt->fetch()) {
 
-if ($attendance_query) {
-    $attendance_data = mysqli_fetch_assoc($attendance_query);
-
-    $present = (int)($attendance_data['present'] ?? 0);
-    $absent  = (int)($attendance_data['absent'] ?? 0);
-}
-
-$attendance_total = $present + $absent;
-
-if ($attendance_total > 0) {
-    $attendance_percentage = round(($present / $attendance_total) * 100, 1);
-} else {
-    $attendance_percentage = 0;
-}
-
-/* ================================
-   SUBJECT-WISE MARKS
-================================ */
-$subjects_labels = [];
-$subjects_marks = [];
-
-$marks_query = mysqli_query(
-    $conn,
-    "SELECT subject_name, ROUND(AVG(marks), 2) AS average_marks
-     FROM marks
-     GROUP BY subject_name
-     ORDER BY subject_name ASC"
-);
-
-if ($marks_query) {
-    while ($row = mysqli_fetch_assoc($marks_query)) {
-        $subjects_labels[] = $row['subject_name'];
-        $subjects_marks[] = (float)$row['average_marks'];
+        $subjects_labels[] = (string) $subject_name;
+        $subjects_marks[] = (float) $average_marks;
     }
+
+    $marks_stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    /*
+    |--------------------------------------------------------------------------
+    | Log Technical Error Privately
+    |--------------------------------------------------------------------------
+    */
+    error_log(
+        'Class Management System - Dashboard database error: ' .
+        $e->getMessage()
+    );
+
+    $database_error =
+        'Some dashboard information could not be loaded right now.';
 }
 
-/* ================================
-   JSON FOR CHARTS
-================================ */
-$subjects_labels_json = json_encode($subjects_labels);
-$subjects_marks_json  = json_encode($subjects_marks);
+/*
+|--------------------------------------------------------------------------
+| JSON Data For Charts
+|--------------------------------------------------------------------------
+*/
+$subjects_labels_json = json_encode(
+    $subjects_labels,
+    JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+);
+
+$subjects_marks_json = json_encode(
+    $subjects_marks,
+    JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK
+);
+
+if ($subjects_labels_json === false) {
+    $subjects_labels_json = '[]';
+}
+
+if ($subjects_marks_json === false) {
+    $subjects_marks_json = '[]';
+}
+
+$current_year = date('Y');
+
 ?>
 
 <!DOCTYPE html>
@@ -110,7 +220,20 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
     <meta charset="UTF-8">
 
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex,nofollow"
+    >
+
+    <meta
+        name="description"
+        content="Class Management System administrator dashboard"
+    >
 
     <title>Dashboard | Class Management System</title>
 
@@ -294,6 +417,20 @@ $subjects_marks_json  = json_encode($subjects_marks);
         }
 
         /* =========================
+           DATABASE NOTICE
+        ========================= */
+
+        .database-notice {
+            background: #fff3cd;
+            border: 1px solid #ffecb5;
+            color: #664d03;
+            border-radius: 12px;
+            padding: 13px 16px;
+            margin-bottom: 25px;
+            font-size: 14px;
+        }
+
+        /* =========================
            BANNER
         ========================= */
 
@@ -303,6 +440,7 @@ $subjects_marks_json  = json_encode($subjects_marks);
             border-radius: 18px;
             overflow: hidden;
             margin-bottom: 28px;
+
             background-image:
                 linear-gradient(
                     90deg,
@@ -310,8 +448,10 @@ $subjects_marks_json  = json_encode($subjects_marks);
                     rgba(37,99,235,0.65)
                 ),
                 url("images/login-bg.jpg");
+
             background-size: cover;
             background-position: center;
+
             display: flex;
             align-items: center;
         }
@@ -503,7 +643,7 @@ $subjects_marks_json  = json_encode($subjects_marks);
             height: 100%;
         }
 
-        .report-card i {
+        .report-card > i {
             font-size: 30px;
             color: #2563eb;
             margin-bottom: 15px;
@@ -520,6 +660,11 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
         .report-card a {
             text-decoration: none;
+        }
+
+        .report-card a i {
+            font-size: inherit;
+            margin: 0;
         }
 
         /* =========================
@@ -550,7 +695,6 @@ $subjects_marks_json  = json_encode($subjects_marks);
             .content {
                 padding: 20px;
             }
-
         }
 
         @media (max-width: 768px) {
@@ -590,7 +734,6 @@ $subjects_marks_json  = json_encode($subjects_marks);
             .banner-content h1 {
                 font-size: 25px;
             }
-
         }
 
     </style>
@@ -610,7 +753,6 @@ $subjects_marks_json  = json_encode($subjects_marks);
         <img
             src="images/logo.png"
             alt="Class Management System Logo"
-            onerror="this.style.display='none';"
         >
 
         <div>
@@ -694,7 +836,7 @@ $subjects_marks_json  = json_encode($subjects_marks);
             <div class="admin-info">
 
                 <strong>
-                    <?php echo $admin_name; ?>
+                    <?php echo e($admin_name); ?>
                 </strong>
 
                 <small>Administrator</small>
@@ -709,6 +851,14 @@ $subjects_marks_json  = json_encode($subjects_marks);
     <!-- CONTENT -->
 
     <div class="content">
+
+        <?php if ($database_error !== ''): ?>
+
+            <div class="database-notice">
+                <?php echo e($database_error); ?>
+            </div>
+
+        <?php endif; ?>
 
 
         <!-- BANNER -->
@@ -865,7 +1015,7 @@ $subjects_marks_json  = json_encode($subjects_marks);
                     <h6>Attendance Percentage</h6>
 
                     <div class="attendance-number attendance-percent">
-                        <?php echo $attendance_percentage; ?>%
+                        <?php echo number_format($attendance_percentage, 1); ?>%
                     </div>
 
                 </div>
@@ -1078,7 +1228,8 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
         <footer>
 
-            © 2026 Class Management System.
+            © <?php echo e($current_year); ?>
+            Class Management System.
             All Rights Reserved.
 
         </footer>
@@ -1091,24 +1242,26 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
 <script>
 
-    /* =========================
-       ATTENDANCE CHART
-    ========================= */
+    /*
+    |--------------------------------------------------------------------------
+    | Attendance Chart
+    |--------------------------------------------------------------------------
+    */
 
     const attendanceCanvas =
-        document.getElementById("attendanceChart");
+        document.getElementById('attendanceChart');
 
     if (attendanceCanvas) {
 
         new Chart(attendanceCanvas, {
 
-            type: "doughnut",
+            type: 'doughnut',
 
             data: {
 
                 labels: [
-                    "Present",
-                    "Absent"
+                    'Present',
+                    'Absent'
                 ],
 
                 datasets: [{
@@ -1131,7 +1284,7 @@ $subjects_marks_json  = json_encode($subjects_marks);
                 plugins: {
 
                     legend: {
-                        position: "bottom"
+                        position: 'bottom'
                     }
 
                 }
@@ -1143,30 +1296,32 @@ $subjects_marks_json  = json_encode($subjects_marks);
     }
 
 
-    /* =========================
-       MARKS CHART
-    ========================= */
+    /*
+    |--------------------------------------------------------------------------
+    | Subject Average Marks Chart
+    |--------------------------------------------------------------------------
+    */
 
     const marksCanvas =
-        document.getElementById("marksChart");
+        document.getElementById('marksChart');
 
     if (marksCanvas) {
 
         new Chart(marksCanvas, {
 
-            type: "bar",
+            type: 'bar',
 
             data: {
 
                 labels:
-                    <?php echo $subjects_labels_json ?: '[]'; ?>,
+                    <?php echo $subjects_labels_json; ?>,
 
                 datasets: [{
 
-                    label: "Average Marks",
+                    label: 'Average Marks',
 
                     data:
-                        <?php echo $subjects_marks_json ?: '[]'; ?>
+                        <?php echo $subjects_marks_json; ?>
 
                 }]
 
@@ -1184,7 +1339,11 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
                         beginAtZero: true,
 
-                        max: 100
+                        max: 100,
+
+                        ticks: {
+                            precision: 0
+                        }
 
                     }
 
@@ -1206,6 +1365,6 @@ $subjects_marks_json  = json_encode($subjects_marks);
 
 </script>
 
-
 </body>
+
 </html>

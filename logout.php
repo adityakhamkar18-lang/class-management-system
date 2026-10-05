@@ -1,10 +1,12 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
 /*
 |--------------------------------------------------------------------------
-| Clear All Session Variables
+| Clear All Session Data
 |--------------------------------------------------------------------------
 */
 $_SESSION = [];
@@ -14,18 +16,21 @@ $_SESSION = [];
 | Delete Session Cookie
 |--------------------------------------------------------------------------
 */
-if (ini_get("session.use_cookies")) {
+if (ini_get('session.use_cookies')) {
 
     $params = session_get_cookie_params();
 
     setcookie(
         session_name(),
         '',
-        time() - 42000,
-        $params["path"],
-        $params["domain"],
-        $params["secure"],
-        $params["httponly"]
+        [
+            'expires'  => time() - 42000,
+            'path'     => $params['path'],
+            'domain'   => $params['domain'],
+            'secure'   => $params['secure'],
+            'httponly' => $params['httponly'],
+            'samesite' => $params['samesite'] ?? 'Lax',
+        ]
     );
 }
 
@@ -38,10 +43,16 @@ session_destroy();
 
 /*
 |--------------------------------------------------------------------------
+| Prevent Cached Protected Pages
+|--------------------------------------------------------------------------
+*/
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
+/*
+|--------------------------------------------------------------------------
 | Redirect To Login
 |--------------------------------------------------------------------------
 */
-header("Location: login.php");
-exit();
-
-?>
+header('Location: login.php');
+exit;

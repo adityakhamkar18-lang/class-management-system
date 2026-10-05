@@ -1,4 +1,4 @@
-gitignore
+
 # Environment / secrets
 .env
 .env.*

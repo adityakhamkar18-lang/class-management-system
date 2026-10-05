@@ -1,85 +1,226 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Class Management System - Students
+|--------------------------------------------------------------------------
+| Displays, searches and manages student records.
+|--------------------------------------------------------------------------
+*/
+
+/*
+|--------------------------------------------------------------------------
+| Authentication
+|--------------------------------------------------------------------------
+*/
+
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database
+|--------------------------------------------------------------------------
+*/
 
-$admin_name = htmlspecialchars($_SESSION['admin'], ENT_QUOTES, 'UTF-8');
+require_once __DIR__ . '/config.php';
 
-$search = trim($_GET['search'] ?? '');
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION['csrf_token'];
+
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
+
+$admin_name = htmlspecialchars(
+    (string) $_SESSION['admin'],
+    ENT_QUOTES,
+    'UTF-8'
+);
+
+/*
+|--------------------------------------------------------------------------
+| Search
+|--------------------------------------------------------------------------
+*/
+
+$search = trim(
+    (string) ($_GET['search'] ?? '')
+);
+
+if (strlen($search) > 100) {
+    $search = substr($search, 0, 100);
+}
 
 $students = [];
+$total_students = 0;
+$database_error = false;
 
-if ($search !== '') {
+/*
+|--------------------------------------------------------------------------
+| Flash Messages
+|--------------------------------------------------------------------------
+*/
 
-    $search_pattern = "%" . $search . "%";
+$delete_success = '';
 
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            roll_no,
-            name,
-            email,
-            phone,
-            gender,
-            class_name
-         FROM students
-         WHERE
-            name LIKE ?
-            OR email LIKE ?
-            OR phone LIKE ?
-            OR roll_no LIKE ?
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load student records.");
-    }
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ssss",
-        $search_pattern,
-        $search_pattern,
-        $search_pattern,
-        $search_pattern
-    );
-
-} else {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            roll_no,
-            name,
-            email,
-            phone,
-            gender,
-            class_name
-         FROM students
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load student records.");
-    }
+if (
+    isset($_SESSION['student_delete_success']) &&
+    is_string($_SESSION['student_delete_success'])
+) {
+    $delete_success = $_SESSION['student_delete_success'];
+    unset($_SESSION['student_delete_success']);
 }
 
-mysqli_stmt_execute($stmt);
+$delete_error = '';
 
-$result = mysqli_stmt_get_result($stmt);
+if (
+    isset($_SESSION['student_delete_error']) &&
+    is_string($_SESSION['student_delete_error'])
+) {
+    $delete_error = $_SESSION['student_delete_error'];
+    unset($_SESSION['student_delete_error']);
+}
 
-$total_students = mysqli_num_rows($result);
+/*
+|--------------------------------------------------------------------------
+| Fetch Students
+|--------------------------------------------------------------------------
+*/
+
+$stmt = null;
+
+try {
+
+    if ($search !== '') {
+
+        $search_pattern = '%' . $search . '%';
+
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                roll_no,
+                name,
+                email,
+                phone,
+                gender,
+                class_name
+             FROM students
+             WHERE
+                name LIKE ?
+                OR email LIKE ?
+                OR phone LIKE ?
+                OR roll_no LIKE ?
+             ORDER BY id DESC'
+        );
+
+        $stmt->bind_param(
+            'ssss',
+            $search_pattern,
+            $search_pattern,
+            $search_pattern,
+            $search_pattern
+        );
+
+    } else {
+
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                roll_no,
+                name,
+                email,
+                phone,
+                gender,
+                class_name
+             FROM students
+             ORDER BY id DESC'
+        );
+    }
+
+    $stmt->execute();
+
+    /*
+    |--------------------------------------------------------------------------
+    | bind_result()
+    |--------------------------------------------------------------------------
+    | Used instead of get_result() for broader hosting compatibility.
+    |--------------------------------------------------------------------------
+    */
+
+    $stmt->bind_result(
+        $id,
+        $roll_no,
+        $name,
+        $email,
+        $phone,
+        $gender,
+        $class_name
+    );
+
+    while ($stmt->fetch()) {
+
+        $students[] = [
+            'id' => (int) $id,
+            'roll_no' => (string) $roll_no,
+            'name' => (string) $name,
+            'email' => (string) $email,
+            'phone' => (string) $phone,
+            'gender' => (string) $gender,
+            'class_name' => (string) $class_name
+        ];
+    }
+
+    $total_students = count($students);
+
+    $stmt->close();
+    $stmt = null;
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Students query error: ' .
+        $e->getMessage()
+    );
+
+    if ($stmt instanceof mysqli_stmt) {
+        try {
+            $stmt->close();
+        } catch (Throwable $ignored) {
+            // Ignore cleanup errors.
+        }
+    }
+
+    http_response_code(500);
+
+    $database_error = true;
+}
 
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 
@@ -90,6 +231,16 @@ $total_students = mysqli_num_rows($result);
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <meta
+        name="description"
+        content="Student management section of the Class Management System."
     >
 
     <title>Students | Class Management System</title>
@@ -371,6 +522,15 @@ $total_students = mysqli_num_rows($result);
         }
 
         /* =========================
+           ALERTS
+        ========================= */
+
+        .alert {
+            border-radius: 10px;
+            margin-bottom: 22px;
+        }
+
+        /* =========================
            TABLE CARD
         ========================= */
 
@@ -513,11 +673,55 @@ $total_students = mysqli_num_rows($result);
         .delete-btn {
             background: #fef2f2;
             color: #dc2626;
+            cursor: pointer;
         }
 
         .delete-btn:hover {
             background: #fee2e2;
             color: #b91c1c;
+        }
+
+        /* =========================
+           DELETE FORM
+        ========================= */
+
+        .delete-form {
+            display: inline;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* =========================
+           ERROR STATE
+        ========================= */
+
+        .error-state {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .error-icon {
+            width: 65px;
+            height: 65px;
+            margin: 0 auto 15px;
+            border-radius: 50%;
+            background: #fef2f2;
+            color: #dc2626;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+        }
+
+        .error-state h5 {
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        .error-state p {
+            color: #6b7280;
+            margin: 0;
+            font-size: 13px;
         }
 
         /* =========================
@@ -629,7 +833,6 @@ $total_students = mysqli_num_rows($result);
 
 <body>
 
-
 <!-- =========================
      SIDEBAR
 ========================= -->
@@ -656,92 +859,57 @@ $total_students = mysqli_num_rows($result);
 
     </div>
 
-
     <div class="nav-title">
         Main Menu
     </div>
 
-
     <a href="dashboard.php">
-
         <i class="bi bi-speedometer2"></i>
-
         Dashboard
-
     </a>
-
 
     <a href="students.php" class="active">
-
         <i class="bi bi-people"></i>
-
         Students
-
     </a>
-
 
     <a href="teachers.php">
-
         <i class="bi bi-person-workspace"></i>
-
         Teachers
-
     </a>
-
 
     <a href="subjects.php">
-
         <i class="bi bi-book"></i>
-
         Subjects
-
     </a>
-
 
     <a href="attendance.php">
-
         <i class="bi bi-calendar-check"></i>
-
         Attendance
-
     </a>
-
 
     <a href="marks.php">
-
         <i class="bi bi-bar-chart"></i>
-
         Marks
-
     </a>
-
 
     <a href="reports.php">
-
         <i class="bi bi-file-earmark-text"></i>
-
         Reports
-
     </a>
 
-
     <a href="logout.php" class="logout-link">
-
         <i class="bi bi-box-arrow-right"></i>
-
         Logout
-
     </a>
 
 </div>
-
 
 <!-- =========================
      MAIN
 ========================= -->
 
 <div class="main">
-
 
     <!-- TOPBAR -->
 
@@ -759,15 +927,11 @@ $total_students = mysqli_num_rows($result);
 
         </div>
 
-
         <div class="admin-profile">
 
             <div class="admin-icon">
-
                 <i class="bi bi-person"></i>
-
             </div>
-
 
             <div class="admin-info">
 
@@ -785,11 +949,9 @@ $total_students = mysqli_num_rows($result);
 
     </div>
 
-
     <!-- CONTENT -->
 
     <div class="content">
-
 
         <!-- PAGE HEADER -->
 
@@ -808,7 +970,6 @@ $total_students = mysqli_num_rows($result);
                     </p>
 
                 </div>
-
 
                 <div class="col-md-4 text-md-end">
 
@@ -829,6 +990,65 @@ $total_students = mysqli_num_rows($result);
 
         </div>
 
+        <!-- FLASH SUCCESS -->
+
+        <?php if ($delete_success !== '') { ?>
+
+            <div
+                class="alert alert-success alert-dismissible fade show"
+                role="alert"
+            >
+
+                <i class="bi bi-check-circle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $delete_success,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php } ?>
+
+        <!-- FLASH ERROR -->
+
+        <?php if ($delete_error !== '') { ?>
+
+            <div
+                class="alert alert-danger alert-dismissible fade show"
+                role="alert"
+            >
+
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $delete_error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php } ?>
 
         <!-- SEARCH -->
 
@@ -837,25 +1057,33 @@ $total_students = mysqli_num_rows($result);
             <form
                 method="GET"
                 action="students.php"
+                autocomplete="off"
             >
 
-                <label class="search-label">
-
+                <label
+                    for="studentSearch"
+                    class="search-label"
+                >
                     Search Students
-
                 </label>
-
 
                 <div class="input-group">
 
                     <input
-                        type="text"
+                        type="search"
+                        id="studentSearch"
                         name="search"
                         class="form-control search-input"
                         placeholder="Search by name, email, phone or roll number..."
-                        value="<?php echo htmlspecialchars($search, ENT_QUOTES, 'UTF-8'); ?>"
+                        value="<?php
+                            echo htmlspecialchars(
+                                $search,
+                                ENT_QUOTES,
+                                'UTF-8'
+                            );
+                        ?>"
+                        maxlength="100"
                     >
-
 
                     <button
                         type="submit"
@@ -867,7 +1095,6 @@ $total_students = mysqli_num_rows($result);
                         Search
 
                     </button>
-
 
                     <?php if ($search !== '') { ?>
 
@@ -890,11 +1117,9 @@ $total_students = mysqli_num_rows($result);
 
         </div>
 
-
         <!-- STUDENT TABLE -->
 
         <div class="table-card">
-
 
             <div class="table-header">
 
@@ -906,41 +1131,68 @@ $total_students = mysqli_num_rows($result);
 
                 </div>
 
+                <?php if (!$database_error) { ?>
 
-                <div class="student-count">
+                    <div class="student-count">
 
-                    <i class="bi bi-people-fill"></i>
+                        <i class="bi bi-people-fill"></i>
 
-                    <?php
+                        <?php
 
-                    if ($search !== '') {
+                        if ($search !== '') {
 
-                        echo $total_students . " result";
+                            echo $total_students . ' result';
 
-                        if ($total_students != 1) {
-                            echo "s";
+                            if ($total_students !== 1) {
+                                echo 's';
+                            }
+
+                        } else {
+
+                            echo $total_students . ' student';
+
+                            if ($total_students !== 1) {
+                                echo 's';
+                            }
+
                         }
 
-                    } else {
+                        ?>
 
-                        echo $total_students . " student";
+                    </div>
 
-                        if ($total_students != 1) {
-                            echo "s";
-                        }
-
-                    }
-
-                    ?>
-
-                </div>
+                <?php } ?>
 
             </div>
 
-
             <div class="table-wrapper">
 
-                <?php if ($total_students > 0) { ?>
+                <?php if ($database_error) { ?>
+
+                    <!-- DATABASE ERROR -->
+
+                    <div class="error-state">
+
+                        <div class="error-icon">
+
+                            <i class="bi bi-exclamation-triangle"></i>
+
+                        </div>
+
+                        <h5>
+                            Unable to load students
+                        </h5>
+
+                        <p>
+                            Student records could not be loaded.
+                            Please try again later.
+                        </p>
+
+                    </div>
+
+                <?php } elseif ($total_students > 0) { ?>
+
+                    <!-- STUDENT TABLE -->
 
                     <table class="table student-table">
 
@@ -948,60 +1200,36 @@ $total_students = mysqli_num_rows($result);
 
                             <tr>
 
-                                <th>
-                                    ID
-                                </th>
-
-                                <th>
-                                    Roll No
-                                </th>
-
-                                <th>
-                                    Student
-                                </th>
-
-                                <th>
-                                    Email
-                                </th>
-
-                                <th>
-                                    Phone
-                                </th>
-
-                                <th>
-                                    Gender
-                                </th>
-
-                                <th>
-                                    Class
-                                </th>
-
-                                <th>
-                                    Actions
-                                </th>
+                                <th>ID</th>
+                                <th>Roll No</th>
+                                <th>Student</th>
+                                <th>Email</th>
+                                <th>Phone</th>
+                                <th>Gender</th>
+                                <th>Class</th>
+                                <th>Actions</th>
 
                             </tr>
 
                         </thead>
 
-
                         <tbody>
 
-                        <?php while ($row = mysqli_fetch_assoc($result)) { ?>
+                        <?php foreach ($students as $row) { ?>
 
                             <tr>
-
 
                                 <td>
 
                                     <span class="student-id">
 
-                                        #<?php echo (int)$row['id']; ?>
+                                        #<?php
+                                        echo (int) $row['id'];
+                                        ?>
 
                                     </span>
 
                                 </td>
-
 
                                 <td>
 
@@ -1019,7 +1247,6 @@ $total_students = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td>
 
                                     <div class="student-name">
@@ -1036,7 +1263,6 @@ $total_students = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td>
 
                                     <?php
@@ -1049,7 +1275,6 @@ $total_students = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td>
 
                                     <?php
@@ -1061,7 +1286,6 @@ $total_students = mysqli_num_rows($result);
                                     ?>
 
                                 </td>
-
 
                                 <td>
 
@@ -1079,7 +1303,6 @@ $total_students = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td>
 
                                     <span class="class-badge">
@@ -1096,12 +1319,12 @@ $total_students = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td class="action-buttons">
 
+                                    <!-- REPORT -->
 
                                     <a
-                                        href="student_report.php?student_id=<?php echo (int)$row['id']; ?>"
+                                        href="student_report.php?student_id=<?php echo (int) $row['id']; ?>"
                                         class="action-btn report-btn"
                                     >
 
@@ -1111,9 +1334,10 @@ $total_students = mysqli_num_rows($result);
 
                                     </a>
 
+                                    <!-- EDIT -->
 
                                     <a
-                                        href="edit_student.php?id=<?php echo (int)$row['id']; ?>"
+                                        href="edit_student.php?id=<?php echo (int) $row['id']; ?>"
                                         class="action-btn edit-btn"
                                     >
 
@@ -1123,19 +1347,45 @@ $total_students = mysqli_num_rows($result);
 
                                     </a>
 
+                                    <!-- DELETE -->
 
-                                    <a
-                                        href="delete_student.php?id=<?php echo (int)$row['id']; ?>"
-                                        class="action-btn delete-btn"
-                                        onclick="return confirm('Are you sure you want to delete this student?');"
+                                    <form
+                                        method="POST"
+                                        action="delete_student.php"
+                                        class="delete-form"
+                                        onsubmit="return confirm('Are you sure you want to delete this student?');"
                                     >
 
-                                        <i class="bi bi-trash"></i>
+                                        <input
+                                            type="hidden"
+                                            name="id"
+                                            value="<?php echo (int) $row['id']; ?>"
+                                        >
 
-                                        Delete
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php
+                                                echo htmlspecialchars(
+                                                    $csrf_token,
+                                                    ENT_QUOTES,
+                                                    'UTF-8'
+                                                );
+                                            ?>"
+                                        >
 
-                                    </a>
+                                        <button
+                                            type="submit"
+                                            class="action-btn delete-btn"
+                                        >
 
+                                            <i class="bi bi-trash"></i>
+
+                                            Delete
+
+                                        </button>
+
+                                    </form>
 
                                 </td>
 
@@ -1147,9 +1397,9 @@ $total_students = mysqli_num_rows($result);
 
                     </table>
 
-
                 <?php } else { ?>
 
+                    <!-- EMPTY STATE -->
 
                     <div class="empty-state">
 
@@ -1158,7 +1408,6 @@ $total_students = mysqli_num_rows($result);
                             <i class="bi bi-people"></i>
 
                         </div>
-
 
                         <?php if ($search !== '') { ?>
 
@@ -1179,7 +1428,6 @@ $total_students = mysqli_num_rows($result);
 
                             </p>
 
-
                         <?php } else { ?>
 
                             <h5>
@@ -1194,36 +1442,29 @@ $total_students = mysqli_num_rows($result);
 
                     </div>
 
-
                 <?php } ?>
 
             </div>
 
         </div>
 
-
         <!-- FOOTER -->
 
         <footer>
 
-            © 2026 Class Management System.
+            © <?php echo date('Y'); ?>
+            Class Management System.
             All Rights Reserved.
 
         </footer>
-
 
     </div>
 
 </div>
 
-
-<?php
-
-if (isset($stmt) && $stmt) {
-    mysqli_stmt_close($stmt);
-}
-
-?>
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+></script>
 
 </body>
 

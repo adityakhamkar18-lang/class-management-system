@@ -1,196 +1,348 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+/*
+|--------------------------------------------------------------------------
+| Database Configuration
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
+
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION['csrf_token'];
 
 /*
 |--------------------------------------------------------------------------
 | Validate Subject ID
 |--------------------------------------------------------------------------
 */
-$id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
-
-if (!$id || $id <= 0) {
-    header("Location: subjects.php");
-    exit();
-}
-
-/*
-|--------------------------------------------------------------------------
-| Fetch Subject
-|--------------------------------------------------------------------------
-*/
-$stmt = mysqli_prepare(
-    $conn,
-    "SELECT id, subject_name, subject_code, teacher_name
-     FROM subjects
-     WHERE id = ?"
+$id = filter_input(
+    INPUT_GET,
+    'id',
+    FILTER_VALIDATE_INT,
+    [
+        'options' => [
+            'min_range' => 1
+        ]
+    ]
 );
 
-mysqli_stmt_bind_param($stmt, "i", $id);
-mysqli_stmt_execute($stmt);
-
-$result = mysqli_stmt_get_result($stmt);
-$row = mysqli_fetch_assoc($result);
-
-mysqli_stmt_close($stmt);
-
-if (!$row) {
-    header("Location: subjects.php");
-    exit();
+if ($id === false || $id === null) {
+    header('Location: subjects.php');
+    exit;
 }
 
 /*
 |--------------------------------------------------------------------------
-| Update Subject
+| Variables
 |--------------------------------------------------------------------------
 */
-if (isset($_POST['update'])) {
+$error = '';
 
-    $subject_name = trim($_POST['subject_name'] ?? '');
-    $subject_code = trim($_POST['subject_code'] ?? '');
-    $teacher_name = trim($_POST['teacher_name'] ?? '');
+$subject_name = '';
+$subject_code = '';
+$teacher_name = '';
+
+/*
+|--------------------------------------------------------------------------
+| Fetch Existing Subject
+|--------------------------------------------------------------------------
+*/
+try {
+
+    $stmt = $conn->prepare(
+        'SELECT subject_name, subject_code, teacher_name
+         FROM subjects
+         WHERE id = ?
+         LIMIT 1'
+    );
+
+    $stmt->bind_param('i', $id);
+    $stmt->execute();
+
+    $stmt->store_result();
+
+    if ($stmt->num_rows === 0) {
+        $stmt->close();
+
+        header('Location: subjects.php');
+        exit;
+    }
+
+    $stmt->bind_result(
+        $subject_name,
+        $subject_code,
+        $teacher_name
+    );
+
+    $stmt->fetch();
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Edit Subject Load Error: ' .
+        $e->getMessage()
+    );
+
+    http_response_code(500);
+    exit('Unable to load the subject. Please try again later.');
+}
+
+/*
+|--------------------------------------------------------------------------
+| Process Update
+|--------------------------------------------------------------------------
+*/
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update'])) {
 
     /*
     |--------------------------------------------------------------------------
-    | Validation
+    | CSRF Validation
     |--------------------------------------------------------------------------
     */
-    if ($subject_name === '' || $subject_code === '' || $teacher_name === '') {
+    $submitted_csrf = $_POST['csrf_token'] ?? '';
 
-        $error = "All fields are required.";
+    if (
+        !is_string($submitted_csrf) ||
+        !hash_equals($csrf_token, $submitted_csrf)
+    ) {
 
-    } elseif (strlen($subject_name) < 2) {
-
-        $error = "Subject name must contain at least 2 characters.";
-
-    } elseif (strlen($subject_code) < 2) {
-
-        $error = "Subject code must contain at least 2 characters.";
-
-    } elseif (strlen($teacher_name) < 2) {
-
-        $error = "Teacher name must contain at least 2 characters.";
+        $error =
+            'Invalid request. Please refresh the page and try again.';
 
     } else {
 
         /*
         |--------------------------------------------------------------------------
-        | Check Duplicate Subject Name
+        | Get Form Data
         |--------------------------------------------------------------------------
         */
-        $check_name = mysqli_prepare(
-            $conn,
-            "SELECT id FROM subjects
-             WHERE subject_name = ? AND id != ?
-             LIMIT 1"
+        $subject_name = trim(
+            (string) ($_POST['subject_name'] ?? '')
         );
 
-        mysqli_stmt_bind_param(
-            $check_name,
-            "si",
-            $subject_name,
-            $id
+        $subject_code = trim(
+            (string) ($_POST['subject_code'] ?? '')
         );
 
-        mysqli_stmt_execute($check_name);
-        mysqli_stmt_store_result($check_name);
-
-        if (mysqli_stmt_num_rows($check_name) > 0) {
-
-            $error = "This subject name already exists.";
-
-        }
-
-        mysqli_stmt_close($check_name);
+        $teacher_name = trim(
+            (string) ($_POST['teacher_name'] ?? '')
+        );
 
         /*
         |--------------------------------------------------------------------------
-        | Check Duplicate Subject Code
+        | Validation
         |--------------------------------------------------------------------------
         */
-        if (!isset($error)) {
+        if ($subject_name === '') {
 
-            $check_code = mysqli_prepare(
-                $conn,
-                "SELECT id FROM subjects
-                 WHERE subject_code = ? AND id != ?
-                 LIMIT 1"
-            );
+            $error = 'Please enter the subject name.';
 
-            mysqli_stmt_bind_param(
-                $check_code,
-                "si",
-                $subject_code,
-                $id
-            );
+        } elseif (mb_strlen($subject_name) < 2) {
 
-            mysqli_stmt_execute($check_code);
-            mysqli_stmt_store_result($check_code);
+            $error =
+                'Subject name must contain at least 2 characters.';
 
-            if (mysqli_stmt_num_rows($check_code) > 0) {
+        } elseif (mb_strlen($subject_name) > 100) {
 
-                $error = "This subject code already exists.";
+            $error =
+                'Subject name must not exceed 100 characters.';
 
-            }
+        } elseif ($subject_code === '') {
 
-            mysqli_stmt_close($check_code);
+            $error = 'Please enter the subject code.';
+
+        } elseif (mb_strlen($subject_code) < 1) {
+
+            $error = 'Subject code cannot be empty.';
+
+        } elseif (mb_strlen($subject_code) > 50) {
+
+            $error =
+                'Subject code must not exceed 50 characters.';
+
+        } elseif ($teacher_name === '') {
+
+            $error = 'Please enter the teacher name.';
+
+        } elseif (mb_strlen($teacher_name) < 2) {
+
+            $error =
+                'Teacher name must contain at least 2 characters.';
+
+        } elseif (mb_strlen($teacher_name) > 100) {
+
+            $error =
+                'Teacher name must not exceed 100 characters.';
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Update Database
+        | Database Validation and Update
         |--------------------------------------------------------------------------
         */
-        if (!isset($error)) {
+        if ($error === '') {
 
-            $update_stmt = mysqli_prepare(
-                $conn,
-                "UPDATE subjects
-                 SET subject_name = ?,
-                     subject_code = ?,
-                     teacher_name = ?
-                 WHERE id = ?"
-            );
+            try {
 
-            mysqli_stmt_bind_param(
-                $update_stmt,
-                "sssi",
-                $subject_name,
-                $subject_code,
-                $teacher_name,
-                $id
-            );
+                /*
+                |--------------------------------------------------------------------------
+                | Check Duplicate Subject Name
+                |--------------------------------------------------------------------------
+                */
+                $check_name = $conn->prepare(
+                    'SELECT id
+                     FROM subjects
+                     WHERE subject_name = ?
+                       AND id != ?
+                     LIMIT 1'
+                );
 
-            if (mysqli_stmt_execute($update_stmt)) {
+                $check_name->bind_param(
+                    'si',
+                    $subject_name,
+                    $id
+                );
 
-                mysqli_stmt_close($update_stmt);
+                $check_name->execute();
+                $check_name->store_result();
 
-                header("Location: subjects.php");
-                exit();
+                if ($check_name->num_rows > 0) {
 
-            } else {
+                    $error =
+                        'This subject name already exists.';
+                }
 
-                $error = "Unable to update subject. Please try again.";
-                mysqli_stmt_close($update_stmt);
+                $check_name->close();
+
+                /*
+                |--------------------------------------------------------------------------
+                | Check Duplicate Subject Code
+                |--------------------------------------------------------------------------
+                */
+                if ($error === '') {
+
+                    $check_code = $conn->prepare(
+                        'SELECT id
+                         FROM subjects
+                         WHERE subject_code = ?
+                           AND id != ?
+                         LIMIT 1'
+                    );
+
+                    $check_code->bind_param(
+                        'si',
+                        $subject_code,
+                        $id
+                    );
+
+                    $check_code->execute();
+                    $check_code->store_result();
+
+                    if ($check_code->num_rows > 0) {
+
+                        $error =
+                            'This subject code already exists.';
+                    }
+
+                    $check_code->close();
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | Update Subject
+                |--------------------------------------------------------------------------
+                */
+                if ($error === '') {
+
+                    $update_stmt = $conn->prepare(
+                        'UPDATE subjects
+                         SET subject_name = ?,
+                             subject_code = ?,
+                             teacher_name = ?
+                         WHERE id = ?'
+                    );
+
+                    $update_stmt->bind_param(
+                        'sssi',
+                        $subject_name,
+                        $subject_code,
+                        $teacher_name,
+                        $id
+                    );
+
+                    $update_stmt->execute();
+                    $update_stmt->close();
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Success Message
+                    |--------------------------------------------------------------------------
+                    */
+                    $_SESSION['subject_update_success'] =
+                        'Subject updated successfully.';
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Regenerate CSRF Token
+                    |--------------------------------------------------------------------------
+                    */
+                    $_SESSION['csrf_token'] = bin2hex(
+                        random_bytes(32)
+                    );
+
+                    header('Location: subjects.php');
+                    exit;
+                }
+
+            } catch (mysqli_sql_exception $e) {
+
+                error_log(
+                    'Class Management System - Update Subject Error: ' .
+                    $e->getMessage()
+                );
+
+                if ((int) $e->getCode() === 1062) {
+
+                    $error =
+                        'A subject with the same name or code already exists.';
+
+                } else {
+
+                    $error =
+                        'Unable to update the subject. Please try again.';
+                }
             }
         }
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Keep Updated Values in Form
-    |--------------------------------------------------------------------------
-    */
-    $row['subject_name'] = $subject_name;
-    $row['subject_code'] = $subject_code;
-    $row['teacher_name'] = $teacher_name;
 }
+
 ?>
 
 <!DOCTYPE html>
@@ -199,129 +351,224 @@ if (isset($_POST['update'])) {
 <head>
 
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Edit Subject</title>
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <title>Edit Subject - Class Management System</title>
 
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
         rel="stylesheet"
     >
 
+    <style>
+
+        body {
+            background-color: #f5f7fb;
+            min-height: 100vh;
+        }
+
+        .form-card {
+            max-width: 600px;
+            margin: 50px auto;
+            background: #ffffff;
+            padding: 35px;
+            border-radius: 15px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        .page-title {
+            font-weight: 600;
+            color: #212529;
+        }
+
+        .form-label {
+            font-weight: 500;
+        }
+
+        .form-control {
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .form-control:focus {
+            box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.15);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+    </style>
+
 </head>
 
 <body>
 
-<div class="container mt-5 mb-5">
+<div class="container">
 
-    <div class="row justify-content-center">
+    <div class="form-card">
 
-        <div class="col-md-7 col-lg-6">
+        <h2 class="page-title mb-4">
+            Edit Subject
+        </h2>
 
-            <div class="card shadow">
+        <?php if ($error !== ''): ?>
 
-                <div class="card-header bg-primary text-white">
+            <div
+                class="alert alert-danger"
+                role="alert"
+            >
+                <?php
+                echo htmlspecialchars(
+                    $error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+            </div>
 
-                    <h4 class="mb-0">Edit Subject</h4>
+        <?php endif; ?>
 
-                </div>
+        <form method="POST" action="">
 
-                <div class="card-body">
+            <!-- CSRF Protection -->
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?php
+                    echo htmlspecialchars(
+                        $csrf_token,
+                        ENT_QUOTES,
+                        'UTF-8'
+                    );
+                ?>"
+            >
 
-                    <?php if (isset($error)) { ?>
+            <!-- Subject Name -->
+            <div class="mb-3">
 
-                        <div class="alert alert-danger">
-                            <?php echo htmlspecialchars($error); ?>
-                        </div>
+                <label
+                    for="subject_name"
+                    class="form-label"
+                >
+                    Subject Name
+                </label>
 
-                    <?php } ?>
-
-                    <form method="POST">
-
-                        <!-- Subject Name -->
-                        <div class="mb-3">
-
-                            <label class="form-label">
-                                Subject Name
-                            </label>
-
-                            <input
-                                type="text"
-                                name="subject_name"
-                                class="form-control"
-                                value="<?php echo htmlspecialchars($row['subject_name']); ?>"
-                                maxlength="100"
-                                required
-                            >
-
-                        </div>
-
-                        <!-- Subject Code -->
-                        <div class="mb-3">
-
-                            <label class="form-label">
-                                Subject Code
-                            </label>
-
-                            <input
-                                type="text"
-                                name="subject_code"
-                                class="form-control"
-                                value="<?php echo htmlspecialchars($row['subject_code']); ?>"
-                                maxlength="50"
-                                required
-                            >
-
-                        </div>
-
-                        <!-- Teacher Name -->
-                        <div class="mb-3">
-
-                            <label class="form-label">
-                                Teacher Name
-                            </label>
-
-                            <input
-                                type="text"
-                                name="teacher_name"
-                                class="form-control"
-                                value="<?php echo htmlspecialchars($row['teacher_name']); ?>"
-                                maxlength="100"
-                                required
-                            >
-
-                        </div>
-
-                        <div class="d-flex gap-2">
-
-                            <button
-                                type="submit"
-                                name="update"
-                                class="btn btn-primary"
-                            >
-                                Update Subject
-                            </button>
-
-                            <a
-                                href="subjects.php"
-                                class="btn btn-secondary"
-                            >
-                                Back
-                            </a>
-
-                        </div>
-
-                    </form>
-
-                </div>
+                <input
+                    type="text"
+                    id="subject_name"
+                    name="subject_name"
+                    class="form-control"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $subject_name,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="100"
+                    autocomplete="off"
+                    required
+                >
 
             </div>
 
-        </div>
+            <!-- Subject Code -->
+            <div class="mb-3">
+
+                <label
+                    for="subject_code"
+                    class="form-label"
+                >
+                    Subject Code
+                </label>
+
+                <input
+                    type="text"
+                    id="subject_code"
+                    name="subject_code"
+                    class="form-control"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $subject_code,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="50"
+                    autocomplete="off"
+                    required
+                >
+
+            </div>
+
+            <!-- Teacher Name -->
+            <div class="mb-4">
+
+                <label
+                    for="teacher_name"
+                    class="form-label"
+                >
+                    Teacher Name
+                </label>
+
+                <input
+                    type="text"
+                    id="teacher_name"
+                    name="teacher_name"
+                    class="form-control"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $teacher_name,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="100"
+                    autocomplete="off"
+                    required
+                >
+
+            </div>
+
+            <!-- Buttons -->
+            <div class="button-group">
+
+                <button
+                    type="submit"
+                    name="update"
+                    value="1"
+                    class="btn btn-primary px-4"
+                >
+                    Update Subject
+                </button>
+
+                <a
+                    href="subjects.php"
+                    class="btn btn-secondary px-4"
+                >
+                    Back
+                </a>
+
+            </div>
+
+        </form>
 
     </div>
 
 </div>
 
 </body>
+
 </html>

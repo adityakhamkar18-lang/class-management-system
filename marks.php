@@ -1,95 +1,174 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+require_once __DIR__ . '/config.php';
 
-// ----------------------------------------------------
-// Admin name
-// ----------------------------------------------------
-$admin_name = $_SESSION['admin'] ?? 'Administrator';
+/*
+|--------------------------------------------------------------------------
+| Helper
+|--------------------------------------------------------------------------
+*/
 
-// ----------------------------------------------------
-// Search
-// ----------------------------------------------------
-$search = trim($_GET['search'] ?? '');
-
-// ----------------------------------------------------
-// Fetch Marks
-// ----------------------------------------------------
-if ($search !== '') {
-
-    $search_pattern = "%" . $search . "%";
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, student_id, student_name, subject_name, marks
-         FROM marks
-         WHERE student_name LIKE ?
-            OR subject_name LIKE ?
-            OR CAST(marks AS CHAR) LIKE ?
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to prepare marks query.");
-    }
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "sss",
-        $search_pattern,
-        $search_pattern,
-        $search_pattern
-    );
-
-} else {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, student_id, student_name, subject_name, marks
-         FROM marks
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to prepare marks query.");
-    }
+function e(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
-// ----------------------------------------------------
-// Execute Query
-// ----------------------------------------------------
-if (!mysqli_stmt_execute($stmt)) {
-    die("Unable to load marks records.");
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-$result = mysqli_stmt_get_result($stmt);
+$csrf_token = $_SESSION['csrf_token'];
 
-$total_records = mysqli_num_rows($result);
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
 
-// ----------------------------------------------------
-// Calculate performance summary
-// ----------------------------------------------------
-$total_marks = 0;
-$highest_marks = 0;
+$admin_name = (string) ($_SESSION['admin'] ?? 'Administrator');
+
+/*
+|--------------------------------------------------------------------------
+| Flash Messages
+|--------------------------------------------------------------------------
+*/
+
+$success_message = '';
+
+if (isset($_SESSION['mark_add_success'])) {
+    $success_message = (string) $_SESSION['mark_add_success'];
+    unset($_SESSION['mark_add_success']);
+}
+
+if (isset($_SESSION['mark_update_success'])) {
+    $success_message = (string) $_SESSION['mark_update_success'];
+    unset($_SESSION['mark_update_success']);
+}
+
+if (isset($_SESSION['mark_delete_success'])) {
+    $success_message = (string) $_SESSION['mark_delete_success'];
+    unset($_SESSION['mark_delete_success']);
+}
+
+$error_message = '';
+
+if (isset($_SESSION['mark_delete_error'])) {
+    $error_message = (string) $_SESSION['mark_delete_error'];
+    unset($_SESSION['mark_delete_error']);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Search
+|--------------------------------------------------------------------------
+*/
+
+$search = trim((string) ($_GET['search'] ?? ''));
+
+if (strlen($search) > 100) {
+    $search = substr($search, 0, 100);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Variables
+|--------------------------------------------------------------------------
+*/
+
+$marks_records = [];
+$total_records = 0;
+
+$total_marks = 0.0;
+$highest_marks = 0.0;
 $passed_count = 0;
 $failed_count = 0;
+$average_marks = 0.0;
 
-if ($total_records > 0) {
+$database_error = '';
 
-    while ($summary = mysqli_fetch_assoc($result)) {
+/*
+|--------------------------------------------------------------------------
+| Fetch Marks
+|--------------------------------------------------------------------------
+*/
 
-        $mark_value = (float)$summary['marks'];
+try {
+
+    if ($search !== '') {
+
+        $search_pattern = '%' . $search . '%';
+
+        $stmt = $conn->prepare(
+            "SELECT id, student_id, student_name, subject_name, marks
+             FROM marks
+             WHERE student_name LIKE ?
+                OR subject_name LIKE ?
+                OR CAST(marks AS CHAR) LIKE ?
+             ORDER BY id DESC"
+        );
+
+        $stmt->bind_param(
+            'sss',
+            $search_pattern,
+            $search_pattern,
+            $search_pattern
+        );
+
+    } else {
+
+        $stmt = $conn->prepare(
+            "SELECT id, student_id, student_name, subject_name, marks
+             FROM marks
+             ORDER BY id DESC"
+        );
+    }
+
+    $stmt->execute();
+
+    $stmt->store_result();
+
+    $stmt->bind_result(
+        $id,
+        $student_id,
+        $student_name,
+        $subject_name,
+        $marks
+    );
+
+    while ($stmt->fetch()) {
+
+        $mark_value = (float) $marks;
+
+        $marks_records[] = [
+            'id' => (int) $id,
+            'student_id' => (int) $student_id,
+            'student_name' => (string) $student_name,
+            'subject_name' => (string) $subject_name,
+            'marks' => $marks
+        ];
 
         $total_marks += $mark_value;
 
-        if ($mark_value > $highest_marks) {
+        if ($total_records === 0 || $mark_value > $highest_marks) {
             $highest_marks = $mark_value;
         }
 
@@ -98,17 +177,26 @@ if ($total_records > 0) {
         } else {
             $failed_count++;
         }
+
+        $total_records++;
     }
 
-    mysqli_data_seek($result, 0);
+    $stmt->close();
+
+    if ($total_records > 0) {
+        $average_marks = round($total_marks / $total_records, 2);
+    }
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Marks page database error: ' . $e->getMessage()
+    );
+
+    $database_error = 'Unable to load marks records right now. Please try again later.';
 }
 
-$average_marks = $total_records > 0
-    ? round($total_marks / $total_records, 2)
-    : 0;
-
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 
@@ -119,6 +207,11 @@ $average_marks = $total_records > 0
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
     >
 
     <title>Marks Management | Class Management System</title>
@@ -256,7 +349,7 @@ $average_marks = $total_records > 0
             height: 38px;
             border-radius: 50%;
             background: #2563eb;
-            color: white;
+            color: #ffffff;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -297,6 +390,14 @@ $average_marks = $total_records > 0
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        /* ==============================
+           ALERTS
+        ============================== */
+
+        .alert {
+            border-radius: 10px;
         }
 
         /* ==============================
@@ -563,10 +664,6 @@ $average_marks = $total_records > 0
 
 <body>
 
-<!-- ==============================
-     SIDEBAR
-============================== -->
-
 <aside class="sidebar">
 
     <div class="sidebar-brand">
@@ -612,7 +709,7 @@ $average_marks = $total_records > 0
         </li>
 
         <li>
-            <a href="marks.php" class="active">
+            <a href="marks.php" class="active" aria-current="page">
                 <i class="bi bi-bar-chart-fill"></i>
                 Marks
             </a>
@@ -636,13 +733,7 @@ $average_marks = $total_records > 0
 
 </aside>
 
-<!-- ==============================
-     MAIN CONTENT
-============================== -->
-
 <div class="main-content">
-
-    <!-- TOPBAR -->
 
     <div class="topbar">
 
@@ -657,18 +748,14 @@ $average_marks = $total_records > 0
             </div>
 
             <span>
-                <?php echo htmlspecialchars($admin_name); ?>
+                <?php echo e($admin_name); ?>
             </span>
 
         </div>
 
     </div>
 
-    <!-- CONTENT -->
-
     <main class="content-area">
-
-        <!-- PAGE HEADER -->
 
         <div class="page-header">
 
@@ -706,7 +793,57 @@ $average_marks = $total_records > 0
 
         </div>
 
-        <!-- STATISTICS -->
+        <?php if ($success_message !== ''): ?>
+
+            <div
+                class="alert alert-success alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-check-circle-fill me-2"></i>
+                <?php echo e($success_message); ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($error_message !== ''): ?>
+
+            <div
+                class="alert alert-danger alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <?php echo e($error_message); ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($database_error !== ''): ?>
+
+            <div
+                class="alert alert-danger"
+                role="alert"
+            >
+                <i class="bi bi-database-x me-2"></i>
+                <?php echo e($database_error); ?>
+            </div>
+
+        <?php endif; ?>
 
         <div class="row g-3">
 
@@ -743,7 +880,7 @@ $average_marks = $total_records > 0
                     </div>
 
                     <div class="stat-value">
-                        <?php echo htmlspecialchars((string)$average_marks); ?>
+                        <?php echo e((string) $average_marks); ?>
                     </div>
 
                 </div>
@@ -763,7 +900,7 @@ $average_marks = $total_records > 0
                     </div>
 
                     <div class="stat-value">
-                        <?php echo htmlspecialchars((string)$highest_marks); ?>
+                        <?php echo e((string) $highest_marks); ?>
                     </div>
 
                 </div>
@@ -792,8 +929,6 @@ $average_marks = $total_records > 0
 
         </div>
 
-        <!-- SEARCH -->
-
         <div class="search-card">
 
             <form
@@ -814,8 +949,9 @@ $average_marks = $total_records > 0
                             name="search"
                             class="form-control search-input"
                             placeholder="Search by student name, subject or marks..."
-                            value="<?php echo htmlspecialchars($search); ?>"
+                            value="<?php echo e($search); ?>"
                             maxlength="100"
+                            autocomplete="off"
                         >
 
                     </div>
@@ -835,7 +971,7 @@ $average_marks = $total_records > 0
 
                 </div>
 
-                <?php if ($search !== '') { ?>
+                <?php if ($search !== ''): ?>
 
                     <div class="mt-3">
 
@@ -844,7 +980,7 @@ $average_marks = $total_records > 0
                         </span>
 
                         <strong>
-                            "<?php echo htmlspecialchars($search); ?>"
+                            "<?php echo e($search); ?>"
                         </strong>
 
                         <span class="badge bg-primary ms-2">
@@ -861,13 +997,11 @@ $average_marks = $total_records > 0
 
                     </div>
 
-                <?php } ?>
+                <?php endif; ?>
 
             </form>
 
         </div>
-
-        <!-- TABLE -->
 
         <div class="table-card">
 
@@ -895,7 +1029,7 @@ $average_marks = $total_records > 0
 
             </div>
 
-            <?php if ($total_records > 0) { ?>
+            <?php if ($total_records > 0): ?>
 
                 <div class="table-responsive">
 
@@ -906,15 +1040,10 @@ $average_marks = $total_records > 0
                             <tr>
 
                                 <th>ID</th>
-
                                 <th>Student</th>
-
                                 <th>Subject</th>
-
                                 <th>Marks</th>
-
                                 <th>Performance</th>
-
                                 <th>Actions</th>
 
                             </tr>
@@ -923,33 +1052,38 @@ $average_marks = $total_records > 0
 
                         <tbody>
 
-                        <?php while ($row = mysqli_fetch_assoc($result)) { ?>
+                        <?php foreach ($marks_records as $row): ?>
 
                             <?php
-                            $mark_value = (float)$row['marks'];
+
+                            $mark_value = (float) $row['marks'];
 
                             if ($mark_value >= 40) {
-                                $performance_class = "pass-badge";
-                                $performance_text = "Pass";
+                                $performance_class = 'pass-badge';
+                                $performance_text = 'Pass';
                             } else {
-                                $performance_class = "fail-badge";
-                                $performance_text = "Needs Improvement";
+                                $performance_class = 'fail-badge';
+                                $performance_text = 'Needs Improvement';
                             }
+
                             ?>
 
                             <tr>
 
                                 <td>
                                     <span class="text-muted">
-                                        #<?php echo (int)$row['id']; ?>
+                                        #<?php echo (int) $row['id']; ?>
                                     </span>
                                 </td>
 
                                 <td>
 
                                     <div class="student-name">
+
                                         <i class="bi bi-person-fill text-primary"></i>
-                                        <?php echo htmlspecialchars($row['student_name']); ?>
+
+                                        <?php echo e((string) $row['student_name']); ?>
+
                                     </div>
 
                                 </td>
@@ -957,8 +1091,11 @@ $average_marks = $total_records > 0
                                 <td>
 
                                     <div class="subject-name">
+
                                         <i class="bi bi-book text-secondary"></i>
-                                        <?php echo htmlspecialchars($row['subject_name']); ?>
+
+                                        <?php echo e((string) $row['subject_name']); ?>
+
                                     </div>
 
                                 </td>
@@ -967,11 +1104,7 @@ $average_marks = $total_records > 0
 
                                     <span class="marks-badge">
 
-                                        <?php
-                                        echo htmlspecialchars(
-                                            (string)$row['marks']
-                                        );
-                                        ?>
+                                        <?php echo e((string) $row['marks']); ?>
 
                                         / 100
 
@@ -983,7 +1116,7 @@ $average_marks = $total_records > 0
 
                                     <span class="marks-badge <?php echo $performance_class; ?>">
 
-                                        <?php echo $performance_text; ?>
+                                        <?php echo e($performance_text); ?>
 
                                     </span>
 
@@ -992,7 +1125,7 @@ $average_marks = $total_records > 0
                                 <td class="action-buttons">
 
                                     <a
-                                        href="edit_marks.php?id=<?php echo (int)$row['id']; ?>"
+                                        href="edit_marks.php?id=<?php echo (int) $row['id']; ?>"
                                         class="btn btn-sm btn-outline-warning"
                                         title="Edit Marks"
                                     >
@@ -1000,21 +1133,41 @@ $average_marks = $total_records > 0
                                         Edit
                                     </a>
 
-                                    <a
-                                        href="delete_marks.php?id=<?php echo (int)$row['id']; ?>"
-                                        class="btn btn-sm btn-outline-danger"
-                                        title="Delete Marks"
-                                        onclick="return confirm('Are you sure you want to delete this marks record?');"
+                                    <form
+                                        method="POST"
+                                        action="delete_marks.php"
+                                        class="d-inline delete-form"
+                                        onsubmit="return confirm('Are you sure you want to delete this marks record?');"
                                     >
-                                        <i class="bi bi-trash3"></i>
-                                        Delete
-                                    </a>
+
+                                        <input
+                                            type="hidden"
+                                            name="id"
+                                            value="<?php echo (int) $row['id']; ?>"
+                                        >
+
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php echo e($csrf_token); ?>"
+                                        >
+
+                                        <button
+                                            type="submit"
+                                            class="btn btn-sm btn-outline-danger"
+                                            title="Delete Marks"
+                                        >
+                                            <i class="bi bi-trash3"></i>
+                                            Delete
+                                        </button>
+
+                                    </form>
 
                                 </td>
 
                             </tr>
 
-                        <?php } ?>
+                        <?php endforeach; ?>
 
                         </tbody>
 
@@ -1022,13 +1175,13 @@ $average_marks = $total_records > 0
 
                 </div>
 
-            <?php } else { ?>
+            <?php else: ?>
 
                 <div class="empty-state">
 
                     <i class="bi bi-bar-chart"></i>
 
-                    <?php if ($search !== '') { ?>
+                    <?php if ($search !== ''): ?>
 
                         <h5>
                             No Marks Records Found
@@ -1046,7 +1199,7 @@ $average_marks = $total_records > 0
                             Show All Records
                         </a>
 
-                    <?php } else { ?>
+                    <?php elseif ($database_error === ''): ?>
 
                         <h5>
                             No Marks Records Yet
@@ -1064,32 +1217,28 @@ $average_marks = $total_records > 0
                             Add Marks
                         </a>
 
-                    <?php } ?>
+                    <?php endif; ?>
 
                 </div>
 
-            <?php } ?>
+            <?php endif; ?>
 
         </div>
 
     </main>
 
-    <!-- FOOTER -->
-
     <footer class="footer">
 
-        © 2026 Class Management System.
+        © <?php echo date('Y'); ?> Class Management System.
         All rights reserved.
 
     </footer>
 
 </div>
 
-<?php
-
-mysqli_stmt_close($stmt);
-
-?>
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+></script>
 
 </body>
 

@@ -1,115 +1,217 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+require_once __DIR__ . '/config.php';
 
-// ----------------------------------------------------
-// Initialize variables
-// ----------------------------------------------------
-$error = "";
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 
-$name = "";
-$email = "";
-$phone = "";
-$subject = "";
+$csrf_token = $_SESSION['csrf_token'];
 
-// ----------------------------------------------------
-// Process form submission
-// ----------------------------------------------------
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
+/*
+|--------------------------------------------------------------------------
+| Initialize Variables
+|--------------------------------------------------------------------------
+*/
+$error = '';
 
-    // Get and clean form data
-    $name = trim($_POST["name"] ?? "");
-    $email = trim($_POST["email"] ?? "");
-    $phone = trim($_POST["phone"] ?? "");
-    $subject = trim($_POST["subject"] ?? "");
+$name = '';
+$email = '';
+$phone = '';
+$subject = '';
 
-    // ------------------------------------------------
-    // Validate Name
-    // ------------------------------------------------
-    if ($name === "") {
+/*
+|--------------------------------------------------------------------------
+| Process Form Submission
+|--------------------------------------------------------------------------
+*/
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-        $error = "Please enter the teacher's name.";
+    /*
+    |--------------------------------------------------------------------------
+    | Verify CSRF Token
+    |--------------------------------------------------------------------------
+    */
+    $submitted_token = (string) ($_POST['csrf_token'] ?? '');
 
-    } elseif (strlen($name) < 2) {
-
-        $error = "Teacher name must contain at least 2 characters.";
-
-    // ------------------------------------------------
-    // Validate Email
-    // ------------------------------------------------
-    } elseif ($email === "") {
-
-        $error = "Please enter the teacher's email.";
-
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-
-        $error = "Please enter a valid email address.";
-
-    // ------------------------------------------------
-    // Validate Phone
-    // ------------------------------------------------
-    } elseif ($phone === "") {
-
-        $error = "Please enter the teacher's phone number.";
-
-    } elseif (!preg_match("/^[0-9]{10}$/", $phone)) {
-
-        $error = "Phone number must contain exactly 10 digits.";
-
-    // ------------------------------------------------
-    // Validate Subject
-    // ------------------------------------------------
-    } elseif ($subject === "") {
-
-        $error = "Please enter the teacher's subject.";
-
+    if (
+        $submitted_token === '' ||
+        !hash_equals($csrf_token, $submitted_token)
+    ) {
+        $error = 'Invalid request. Please refresh the page and try again.';
     }
 
-    // ------------------------------------------------
-    // Insert Teacher
-    // ------------------------------------------------
-    if ($error === "") {
+    /*
+    |--------------------------------------------------------------------------
+    | Get Form Data
+    |--------------------------------------------------------------------------
+    */
+    if ($error === '') {
 
-        $stmt = mysqli_prepare(
-            $conn,
-            "INSERT INTO teachers (name, email, phone, subject) VALUES (?, ?, ?, ?)"
-        );
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $email = trim((string) ($_POST['email'] ?? ''));
+        $phone = trim((string) ($_POST['phone'] ?? ''));
+        $subject = trim((string) ($_POST['subject'] ?? ''));
 
-        if ($stmt) {
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Teacher Name
+        |--------------------------------------------------------------------------
+        */
+        if ($name === '') {
 
-            mysqli_stmt_bind_param(
-                $stmt,
-                "ssss",
+            $error = "Please enter the teacher's name.";
+
+        } elseif (strlen($name) < 2) {
+
+            $error = 'Teacher name must contain at least 2 characters.';
+
+        } elseif (strlen($name) > 100) {
+
+            $error = 'Teacher name cannot exceed 100 characters.';
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Email
+        |--------------------------------------------------------------------------
+        */
+        elseif ($email === '') {
+
+            $error = "Please enter the teacher's email.";
+
+        } elseif (strlen($email) > 150) {
+
+            $error = 'Email address cannot exceed 150 characters.';
+
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+
+            $error = 'Please enter a valid email address.';
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Phone
+        |--------------------------------------------------------------------------
+        */
+        elseif ($phone === '') {
+
+            $error = "Please enter the teacher's phone number.";
+
+        } elseif (!preg_match('/^[0-9]{10}$/', $phone)) {
+
+            $error = 'Phone number must contain exactly 10 digits.';
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validate Subject
+        |--------------------------------------------------------------------------
+        */
+        elseif ($subject === '') {
+
+            $error = "Please enter the teacher's subject.";
+
+        } elseif (strlen($subject) > 100) {
+
+            $error = 'Subject cannot exceed 100 characters.';
+        }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Insert Teacher
+    |--------------------------------------------------------------------------
+    */
+    if ($error === '') {
+
+        try {
+
+            $stmt = $conn->prepare(
+                'INSERT INTO teachers (name, email, phone, subject)
+                 VALUES (?, ?, ?, ?)'
+            );
+
+            $stmt->bind_param(
+                'ssss',
                 $name,
                 $email,
                 $phone,
                 $subject
             );
 
-            if (mysqli_stmt_execute($stmt)) {
+            $stmt->execute();
 
-                header("Location: teachers.php");
-                exit();
+            $stmt->close();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Prevent Form Resubmission
+            |--------------------------------------------------------------------------
+            */
+            $_SESSION['teacher_add_success'] =
+                'Teacher added successfully.';
+
+            header('Location: teachers.php');
+            exit;
+
+        } catch (mysqli_sql_exception $e) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | Log Technical Error Privately
+            |--------------------------------------------------------------------------
+            */
+            error_log(
+                'Class Management System - Add teacher error: ' .
+                $e->getMessage()
+            );
+
+            /*
+            |--------------------------------------------------------------------------
+            | Duplicate Entry
+            |--------------------------------------------------------------------------
+            */
+            if ((int) $e->getCode() === 1062) {
+
+                $error =
+                    'A teacher with this information already exists.';
 
             } else {
 
-                $error = "Unable to add teacher. Please try again.";
+                $error =
+                    'Unable to add teacher. Please try again later.';
             }
-
-            mysqli_stmt_close($stmt);
-
-        } else {
-
-            $error = "Database error. Please check your teachers table.";
         }
     }
 }
+
 ?>
 
 <!DOCTYPE html>
@@ -119,11 +221,18 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
     <meta charset="UTF-8">
 
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
 
     <title>Add Teacher - Class Management System</title>
 
-    <!-- Bootstrap -->
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
         rel="stylesheet"
@@ -137,10 +246,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             background: #f4f6f9;
         }
 
-        /* ------------------------------------------------
-           Sidebar
-        ------------------------------------------------ */
-
         .sidebar {
             width: 240px;
             height: 100vh;
@@ -148,14 +253,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             left: 0;
             top: 0;
             background: #212529;
-            color: white;
+            color: #ffffff;
             padding-top: 20px;
+            overflow-y: auto;
         }
 
         .sidebar h3 {
             text-align: center;
             margin-bottom: 25px;
             font-weight: bold;
+            padding: 0 10px;
         }
 
         .sidebar a {
@@ -174,21 +281,18 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             background: #0d6efd;
         }
 
-        /* ------------------------------------------------
-           Main Content
-        ------------------------------------------------ */
-
         .main-content {
             margin-left: 240px;
             padding: 30px;
+            min-height: 100vh;
         }
 
         .page-header {
-            background: white;
+            background: #ffffff;
             padding: 20px 25px;
             border-radius: 12px;
             margin-bottom: 25px;
-            box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
         }
 
         .page-header h2 {
@@ -201,17 +305,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             color: #6c757d;
         }
 
-        /* ------------------------------------------------
-           Form Card
-        ------------------------------------------------ */
-
         .form-card {
             max-width: 750px;
             margin: auto;
-            background: white;
+            background: #ffffff;
             padding: 30px;
             border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.10);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.10);
         }
 
         .form-label {
@@ -225,7 +325,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
         .form-control:focus {
             border-color: #0d6efd;
-            box-shadow: 0 0 0 0.2rem rgba(13,110,253,.15);
+            box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.15);
         }
 
         .btn {
@@ -233,16 +333,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             border-radius: 8px;
         }
 
-        /* ------------------------------------------------
-           Mobile
-        ------------------------------------------------ */
-
         @media (max-width: 768px) {
 
             .sidebar {
                 width: 100%;
                 height: auto;
                 position: relative;
+                overflow-y: visible;
             }
 
             .sidebar h3 {
@@ -264,10 +361,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 </head>
 
 <body>
-
-<!-- ====================================================
-     SIDEBAR
-===================================================== -->
 
 <div class="sidebar">
 
@@ -307,14 +400,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 </div>
 
-
-<!-- ====================================================
-     MAIN CONTENT
-===================================================== -->
-
 <div class="main-content">
-
-    <!-- Page Header -->
 
     <div class="page-header">
 
@@ -326,112 +412,160 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
     </div>
 
-
-    <!-- Form Card -->
-
     <div class="form-card">
 
-        <?php if ($error !== ""): ?>
+        <?php if ($error !== ''): ?>
 
-            <div class="alert alert-danger">
-                <?php echo htmlspecialchars($error); ?>
+            <div
+                class="alert alert-danger"
+                role="alert"
+            >
+                <?php
+                echo htmlspecialchars(
+                    $error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
             </div>
 
         <?php endif; ?>
 
+        <form method="POST" action="add_teacher.php">
 
-        <form method="POST" action="">
-
-
-            <!-- Teacher Name -->
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?php
+                    echo htmlspecialchars(
+                        $csrf_token,
+                        ENT_QUOTES,
+                        'UTF-8'
+                    );
+                ?>"
+            >
 
             <div class="mb-3">
 
-                <label class="form-label">
+                <label
+                    for="name"
+                    class="form-label"
+                >
                     Teacher Name
                 </label>
 
                 <input
                     type="text"
+                    id="name"
                     name="name"
                     class="form-control"
                     placeholder="Enter teacher name"
-                    value="<?php echo htmlspecialchars($name); ?>"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $name,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="100"
+                    autocomplete="name"
                     required
                 >
 
             </div>
 
-
-            <!-- Email -->
-
             <div class="mb-3">
 
-                <label class="form-label">
+                <label
+                    for="email"
+                    class="form-label"
+                >
                     Email
                 </label>
 
                 <input
                     type="email"
+                    id="email"
                     name="email"
                     class="form-control"
                     placeholder="Enter teacher email"
-                    value="<?php echo htmlspecialchars($email); ?>"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $email,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="150"
+                    autocomplete="email"
                     required
                 >
 
             </div>
 
-
-            <!-- Phone -->
-
             <div class="mb-3">
 
-                <label class="form-label">
+                <label
+                    for="phone"
+                    class="form-label"
+                >
                     Phone Number
                 </label>
 
                 <input
                     type="text"
+                    id="phone"
                     name="phone"
                     class="form-control"
                     placeholder="Enter 10-digit phone number"
-                    value="<?php echo htmlspecialchars($phone); ?>"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $phone,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
                     maxlength="10"
                     inputmode="numeric"
+                    autocomplete="tel"
+                    pattern="[0-9]{10}"
                     required
                 >
 
             </div>
 
-
-            <!-- Subject -->
-
             <div class="mb-4">
 
-                <label class="form-label">
+                <label
+                    for="subject"
+                    class="form-label"
+                >
                     Subject
                 </label>
 
                 <input
                     type="text"
+                    id="subject"
                     name="subject"
                     class="form-control"
                     placeholder="Enter subject taught"
-                    value="<?php echo htmlspecialchars($subject); ?>"
+                    value="<?php
+                        echo htmlspecialchars(
+                            $subject,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        );
+                    ?>"
+                    maxlength="100"
                     required
                 >
 
             </div>
 
-
-            <!-- Buttons -->
-
-            <div class="d-flex gap-2">
+            <div class="d-flex gap-2 flex-wrap">
 
                 <button
                     type="submit"
-                    name="save"
                     class="btn btn-primary"
                 >
                     💾 Save Teacher
@@ -451,9 +585,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
     </div>
 
 </div>
-
-
-<!-- Bootstrap JS -->
 
 <script
     src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js">

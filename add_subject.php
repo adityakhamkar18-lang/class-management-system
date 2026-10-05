@@ -1,199 +1,266 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+/*
+|--------------------------------------------------------------------------
+| Database Configuration
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
 
-// ----------------------------------------------------
-// Initialize variables
-// ----------------------------------------------------
-$error = "";
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 
-$subject_name = "";
-$subject_code = "";
-$teacher_name = "";
+$csrf_token = $_SESSION['csrf_token'];
 
-// ----------------------------------------------------
-// Process form submission
-// ----------------------------------------------------
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
+/*
+|--------------------------------------------------------------------------
+| Variables
+|--------------------------------------------------------------------------
+*/
+$error = '';
 
-    // Get and clean form data
-    $subject_name = trim($_POST["subject_name"] ?? "");
-    $subject_code = trim($_POST["subject_code"] ?? "");
-    $teacher_name = trim($_POST["teacher_name"] ?? "");
+$subject_name = '';
+$subject_code = '';
+$teacher_name = '';
 
-    // ------------------------------------------------
-    // Validate Subject Name
-    // ------------------------------------------------
-    if ($subject_name === "") {
+/*
+|--------------------------------------------------------------------------
+| Process Form
+|--------------------------------------------------------------------------
+*/
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
 
-        $error = "Please enter the subject name.";
+    /*
+    |--------------------------------------------------------------------------
+    | CSRF Validation
+    |--------------------------------------------------------------------------
+    */
+    $submitted_csrf = $_POST['csrf_token'] ?? '';
 
-    }
+    if (
+        !is_string($submitted_csrf) ||
+        !hash_equals($csrf_token, $submitted_csrf)
+    ) {
+        $error = 'Invalid request. Please refresh the page and try again.';
+    } else {
 
-    elseif (strlen($subject_name) < 2) {
+        /*
+        |--------------------------------------------------------------------------
+        | Get Form Data
+        |--------------------------------------------------------------------------
+        */
+        $subject_name = trim((string) ($_POST['subject_name'] ?? ''));
+        $subject_code = trim((string) ($_POST['subject_code'] ?? ''));
+        $teacher_name = trim((string) ($_POST['teacher_name'] ?? ''));
 
-        $error = "Subject name must contain at least 2 characters.";
+        /*
+        |--------------------------------------------------------------------------
+        | Validation
+        |--------------------------------------------------------------------------
+        */
+        if ($subject_name === '') {
 
-    }
+            $error = 'Please enter the subject name.';
 
-    // ------------------------------------------------
-    // Validate Subject Code
-    // ------------------------------------------------
-    elseif ($subject_code === "") {
+        } elseif (mb_strlen($subject_name) < 2) {
 
-        $error = "Please enter the subject code.";
+            $error = 'Subject name must contain at least 2 characters.';
 
-    }
+        } elseif (mb_strlen($subject_name) > 100) {
 
-    // ------------------------------------------------
-    // Validate Teacher Name
-    // ------------------------------------------------
-    elseif ($teacher_name === "") {
+            $error = 'Subject name must not exceed 100 characters.';
 
-        $error = "Please enter the teacher name.";
+        } elseif ($subject_code === '') {
 
-    }
+            $error = 'Please enter the subject code.';
 
-    elseif (strlen($teacher_name) < 2) {
+        } elseif (mb_strlen($subject_code) < 1) {
 
-        $error = "Teacher name must contain at least 2 characters.";
+            $error = 'Subject code cannot be empty.';
 
-    }
+        } elseif (mb_strlen($subject_code) > 50) {
 
-    else {
+            $error = 'Subject code must not exceed 50 characters.';
 
-        // ------------------------------------------------
-        // Check duplicate subject code
-        // ------------------------------------------------
-        $check_code_stmt = mysqli_prepare(
-            $conn,
-            "SELECT id
-             FROM subjects
-             WHERE subject_code = ?
-             LIMIT 1"
-        );
+        } elseif ($teacher_name === '') {
 
-        if (!$check_code_stmt) {
+            $error = 'Please enter the teacher name.';
 
-            $error = "Database error. Please try again.";
+        } elseif (mb_strlen($teacher_name) < 2) {
 
-        } else {
+            $error = 'Teacher name must contain at least 2 characters.';
 
-            mysqli_stmt_bind_param(
-                $check_code_stmt,
-                "s",
-                $subject_code
-            );
+        } elseif (mb_strlen($teacher_name) > 100) {
 
-            mysqli_stmt_execute($check_code_stmt);
-
-            $code_result = mysqli_stmt_get_result($check_code_stmt);
-
-            if (
-                $code_result &&
-                mysqli_num_rows($code_result) > 0
-            ) {
-
-                $error = "This subject code already exists.";
-
-            }
-
-            mysqli_stmt_close($check_code_stmt);
+            $error = 'Teacher name must not exceed 100 characters.';
         }
 
-        // ------------------------------------------------
-        // Check duplicate subject name
-        // ------------------------------------------------
-        if ($error === "") {
+        /*
+        |--------------------------------------------------------------------------
+        | Database Operations
+        |--------------------------------------------------------------------------
+        */
+        if ($error === '') {
 
-            $check_name_stmt = mysqli_prepare(
-                $conn,
-                "SELECT id
-                 FROM subjects
-                 WHERE subject_name = ?
-                 LIMIT 1"
-            );
+            try {
 
-            if (!$check_name_stmt) {
-
-                $error = "Database error. Please try again.";
-
-            } else {
-
-                mysqli_stmt_bind_param(
-                    $check_name_stmt,
-                    "s",
-                    $subject_name
+                /*
+                |--------------------------------------------------------------------------
+                | Check Duplicate Subject Code
+                |--------------------------------------------------------------------------
+                */
+                $check_code_stmt = $conn->prepare(
+                    'SELECT id
+                     FROM subjects
+                     WHERE subject_code = ?
+                     LIMIT 1'
                 );
 
-                mysqli_stmt_execute($check_name_stmt);
+                $check_code_stmt->bind_param(
+                    's',
+                    $subject_code
+                );
 
-                $name_result =
-                    mysqli_stmt_get_result($check_name_stmt);
+                $check_code_stmt->execute();
+                $check_code_stmt->store_result();
 
-                if (
-                    $name_result &&
-                    mysqli_num_rows($name_result) > 0
-                ) {
+                if ($check_code_stmt->num_rows > 0) {
 
-                    $error = "This subject already exists.";
-
+                    $error = 'This subject code already exists.';
                 }
 
-                mysqli_stmt_close($check_name_stmt);
-            }
-        }
+                $check_code_stmt->close();
 
-        // ------------------------------------------------
-        // Insert Subject
-        // ------------------------------------------------
-        if ($error === "") {
+                /*
+                |--------------------------------------------------------------------------
+                | Check Duplicate Subject Name
+                |--------------------------------------------------------------------------
+                */
+                if ($error === '') {
 
-            $insert_stmt = mysqli_prepare(
-                $conn,
-                "INSERT INTO subjects
-                (subject_name, subject_code, teacher_name)
-                VALUES (?, ?, ?)"
-            );
+                    $check_name_stmt = $conn->prepare(
+                        'SELECT id
+                         FROM subjects
+                         WHERE subject_name = ?
+                         LIMIT 1'
+                    );
 
-            if (!$insert_stmt) {
+                    $check_name_stmt->bind_param(
+                        's',
+                        $subject_name
+                    );
 
-                $error = "Unable to prepare database request.";
+                    $check_name_stmt->execute();
+                    $check_name_stmt->store_result();
 
-            } else {
+                    if ($check_name_stmt->num_rows > 0) {
 
-                mysqli_stmt_bind_param(
-                    $insert_stmt,
-                    "sss",
-                    $subject_name,
-                    $subject_code,
-                    $teacher_name
+                        $error = 'This subject already exists.';
+                    }
+
+                    $check_name_stmt->close();
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | Insert Subject
+                |--------------------------------------------------------------------------
+                */
+                if ($error === '') {
+
+                    $insert_stmt = $conn->prepare(
+                        'INSERT INTO subjects
+                        (subject_name, subject_code, teacher_name)
+                        VALUES (?, ?, ?)'
+                    );
+
+                    $insert_stmt->bind_param(
+                        'sss',
+                        $subject_name,
+                        $subject_code,
+                        $teacher_name
+                    );
+
+                    $insert_stmt->execute();
+                    $insert_stmt->close();
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Success Message
+                    |--------------------------------------------------------------------------
+                    */
+                    $_SESSION['subject_add_success'] =
+                        'Subject added successfully.';
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Regenerate CSRF Token After Successful Submission
+                    |--------------------------------------------------------------------------
+                    */
+                    $_SESSION['csrf_token'] = bin2hex(
+                        random_bytes(32)
+                    );
+
+                    header('Location: subjects.php');
+                    exit;
+                }
+
+            } catch (mysqli_sql_exception $e) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Log Technical Error Privately
+                |--------------------------------------------------------------------------
+                */
+                error_log(
+                    'Class Management System - Add Subject Error: ' .
+                    $e->getMessage()
                 );
 
-                if (mysqli_stmt_execute($insert_stmt)) {
+                /*
+                |--------------------------------------------------------------------------
+                | Duplicate Key Protection
+                |--------------------------------------------------------------------------
+                */
+                if ((int) $e->getCode() === 1062) {
 
-                    mysqli_stmt_close($insert_stmt);
-
-                    header("Location: subjects.php");
-                    exit();
+                    $error =
+                        'A subject with the same name or code already exists.';
 
                 } else {
 
                     $error =
-                        "Unable to save subject. Please try again.";
-
-                    mysqli_stmt_close($insert_stmt);
+                        'Unable to save the subject. Please try again.';
                 }
             }
         }
     }
 }
+
 ?>
 
 <!DOCTYPE html>
@@ -206,6 +273,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
     >
 
     <title>Add Subject - Class Management System</title>
@@ -269,7 +341,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             Add Subject
         </h2>
 
-        <?php if ($error !== "") { ?>
+        <?php if ($error !== ''): ?>
 
             <div
                 class="alert alert-danger"
@@ -279,14 +351,27 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                 echo htmlspecialchars(
                     $error,
                     ENT_QUOTES,
-                    "UTF-8"
+                    'UTF-8'
                 );
                 ?>
             </div>
 
-        <?php } ?>
+        <?php endif; ?>
 
         <form method="POST" action="">
+
+            <!-- CSRF Protection -->
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?php
+                    echo htmlspecialchars(
+                        $csrf_token,
+                        ENT_QUOTES,
+                        'UTF-8'
+                    );
+                ?>"
+            >
 
             <!-- Subject Name -->
             <div class="mb-3">
@@ -307,16 +392,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $subject_name,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter subject name"
                     maxlength="100"
+                    autocomplete="off"
                     required
                 >
 
             </div>
-
 
             <!-- Subject Code -->
             <div class="mb-3">
@@ -337,16 +422,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $subject_code,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter subject code"
                     maxlength="50"
+                    autocomplete="off"
                     required
                 >
 
             </div>
-
 
             <!-- Teacher Name -->
             <div class="mb-4">
@@ -367,16 +452,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $teacher_name,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter teacher name"
                     maxlength="100"
+                    autocomplete="off"
                     required
                 >
 
             </div>
-
 
             <!-- Buttons -->
             <div class="button-group">
@@ -384,6 +469,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                 <button
                     type="submit"
                     name="save"
+                    value="1"
                     class="btn btn-success px-4"
                 >
                     Save Subject

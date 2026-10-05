@@ -1,15 +1,17 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
 /*
 |--------------------------------------------------------------------------
-| If already logged in, go to dashboard
+| If Already Logged In, Go To Dashboard
 |--------------------------------------------------------------------------
 */
-if (isset($_SESSION['admin'])) {
-    header("Location: dashboard.php");
-    exit();
+if (isset($_SESSION['admin']) && $_SESSION['admin'] !== '') {
+    header('Location: dashboard.php');
+    exit;
 }
 
 /*
@@ -17,57 +19,114 @@ if (isset($_SESSION['admin'])) {
 | Database
 |--------------------------------------------------------------------------
 */
-require_once "config.php";
+require_once __DIR__ . '/config.php';
 
-$error = "";
-$success = "";
-$username = "";
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    strlen($_SESSION['csrf_token']) !== 64
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION['csrf_token'];
+
+/*
+|--------------------------------------------------------------------------
+| Reset Key
+|--------------------------------------------------------------------------
+|
+| Set ADMIN_RESET_KEY in your hosting environment.
+|
+| Example:
+| ADMIN_RESET_KEY=your-long-random-secret
+|
+*/
+$admin_reset_key = getenv('ADMIN_RESET_KEY');
+
+if ($admin_reset_key === false || $admin_reset_key === '') {
+    error_log('Class Management System - ADMIN_RESET_KEY is not configured.');
+    $admin_reset_key = '';
+}
+
+$error = '';
+$success = '';
+
+$username = '';
+$reset_key = '';
 
 /*
 |--------------------------------------------------------------------------
 | Reset Password
 |--------------------------------------------------------------------------
 */
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-    $username = trim($_POST["username"] ?? "");
-    $new_password = $_POST["new_password"] ?? "";
-    $confirm_password = $_POST["confirm_password"] ?? "";
+    $username = trim((string) ($_POST['username'] ?? ''));
+    $reset_key = (string) ($_POST['reset_key'] ?? '');
+    $new_password = (string) ($_POST['new_password'] ?? '');
+    $confirm_password = (string) ($_POST['confirm_password'] ?? '');
+    $posted_csrf = (string) ($_POST['csrf_token'] ?? '');
 
     /*
     |--------------------------------------------------------------------------
-    | Basic Validation
+    | CSRF Validation
     |--------------------------------------------------------------------------
     */
+    if (
+        $posted_csrf === '' ||
+        !hash_equals($csrf_token, $posted_csrf)
+    ) {
+        $error = 'Invalid security token. Please refresh the page and try again.';
+    }
 
-    if ($username === "") {
+    /*
+    |--------------------------------------------------------------------------
+    | Validation
+    |--------------------------------------------------------------------------
+    */
+    elseif ($username === '') {
+        $error = 'Please enter your username.';
+    }
 
-        $error = "Please enter your username.";
+    elseif (strlen($username) > 50) {
+        $error = 'Username is too long.';
+    }
 
-    } elseif (strlen($username) > 50) {
+    elseif ($reset_key === '') {
+        $error = 'Please enter the administrator reset key.';
+    }
 
-        $error = "Username is too long.";
+    elseif (
+        $admin_reset_key === '' ||
+        !hash_equals($admin_reset_key, $reset_key)
+    ) {
+        $error = 'Invalid reset key.';
+    }
 
-    } elseif ($new_password === "") {
+    elseif ($new_password === '') {
+        $error = 'Please enter a new password.';
+    }
 
-        $error = "Please enter a new password.";
+    elseif (strlen($new_password) < 6) {
+        $error = 'Password must contain at least 6 characters.';
+    }
 
-    } elseif (strlen($new_password) < 6) {
+    elseif (strlen($new_password) > 100) {
+        $error = 'Password is too long.';
+    }
 
-        $error = "Password must contain at least 6 characters.";
+    elseif ($confirm_password === '') {
+        $error = 'Please confirm your new password.';
+    }
 
-    } elseif (strlen($new_password) > 100) {
-
-        $error = "Password is too long.";
-
-    } elseif ($confirm_password === "") {
-
-        $error = "Please confirm your new password.";
-
-    } elseif ($new_password !== $confirm_password) {
-
-        $error = "Passwords do not match.";
-
+    elseif ($new_password !== $confirm_password) {
+        $error = 'Passwords do not match.';
     }
 
     /*
@@ -75,90 +134,47 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     | Database Operation
     |--------------------------------------------------------------------------
     */
-
-    if ($error === "") {
+    if ($error === '') {
 
         try {
-
-            /*
-            |--------------------------------------------------------------------------
-            | Check database connection
-            |--------------------------------------------------------------------------
-            */
-
-            if (!isset($conn) || !$conn instanceof mysqli) {
-                throw new Exception("Database connection unavailable.");
-            }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Check if MySQL connection is still alive
-            |--------------------------------------------------------------------------
-            */
-
-            if (!mysqli_ping($conn)) {
-
-                mysqli_close($conn);
-
-                require "config.php";
-
-                if (!isset($conn) || !$conn instanceof mysqli) {
-                    throw new Exception("Database reconnection failed.");
-                }
-            }
 
             /*
             |--------------------------------------------------------------------------
             | Find Admin
             |--------------------------------------------------------------------------
             */
-
-            $check_sql = "SELECT id FROM admin WHERE username = ? LIMIT 1";
-
-            $check_stmt = mysqli_prepare($conn, $check_sql);
-
-            if (!$check_stmt) {
-                throw new Exception("Unable to prepare database request.");
-            }
-
-            mysqli_stmt_bind_param(
-                $check_stmt,
-                "s",
-                $username
+            $stmt = $conn->prepare(
+                'SELECT id FROM admin WHERE username = ? LIMIT 1'
             );
 
-            if (!mysqli_stmt_execute($check_stmt)) {
+            $stmt->bind_param('s', $username);
+            $stmt->execute();
+            $stmt->store_result();
 
-                mysqli_stmt_close($check_stmt);
+            if ($stmt->num_rows !== 1) {
 
-                throw new Exception("Unable to check username.");
-            }
+                $stmt->close();
 
-            mysqli_stmt_store_result($check_stmt);
-
-            if (mysqli_stmt_num_rows($check_stmt) === 0) {
-
-                mysqli_stmt_close($check_stmt);
-
-                $error = "Username not found.";
+                $error = 'Unable to reset the password with the information provided.';
 
             } else {
 
-                mysqli_stmt_close($check_stmt);
+                $stmt->close();
 
                 /*
                 |--------------------------------------------------------------------------
-                | Hash New Password
+                | Create Secure Password Hash
                 |--------------------------------------------------------------------------
                 */
-
                 $hashed_password = password_hash(
                     $new_password,
                     PASSWORD_DEFAULT
                 );
 
                 if ($hashed_password === false) {
-                    throw new Exception("Unable to secure the new password.");
+                    throw new RuntimeException(
+                        'Password hashing failed.'
+                    );
                 }
 
                 /*
@@ -166,82 +182,74 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 | Update Password
                 |--------------------------------------------------------------------------
                 */
-
-                $update_sql = "
-                    UPDATE admin
-                    SET password = ?
-                    WHERE username = ?
-                    LIMIT 1
-                ";
-
-                $update_stmt = mysqli_prepare(
-                    $conn,
-                    $update_sql
+                $update_stmt = $conn->prepare(
+                    'UPDATE admin SET password = ? WHERE username = ? LIMIT 1'
                 );
 
-                if (!$update_stmt) {
-                    throw new Exception("Unable to prepare password update.");
-                }
-
-                mysqli_stmt_bind_param(
-                    $update_stmt,
-                    "ss",
+                $update_stmt->bind_param(
+                    'ss',
                     $hashed_password,
                     $username
                 );
 
-                if (!mysqli_stmt_execute($update_stmt)) {
+                $update_stmt->execute();
 
-                    mysqli_stmt_close($update_stmt);
+                if ($update_stmt->affected_rows < 1) {
+                    $update_stmt->close();
 
-                    throw new Exception("Unable to update password.");
+                    throw new RuntimeException(
+                        'Password update did not modify the database.'
+                    );
                 }
 
-                if (mysqli_stmt_affected_rows($update_stmt) < 1) {
-
-                    mysqli_stmt_close($update_stmt);
-
-                    throw new Exception("Password could not be updated.");
-                }
-
-                mysqli_stmt_close($update_stmt);
+                $update_stmt->close();
 
                 /*
                 |--------------------------------------------------------------------------
                 | Success
                 |--------------------------------------------------------------------------
                 */
-
                 $success =
-                    "Password reset successfully. You can now login with your new password.";
+                    'Password reset successfully. You can now log in with your new password.';
 
-                $username = "";
+                $username = '';
+                $reset_key = '';
+
+                /*
+                |--------------------------------------------------------------------------
+                | Regenerate CSRF Token
+                |--------------------------------------------------------------------------
+                */
+                $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+                $csrf_token = $_SESSION['csrf_token'];
             }
 
         } catch (Throwable $e) {
 
             /*
             |--------------------------------------------------------------------------
-            | Log real technical error
+            | Log Technical Error Privately
             |--------------------------------------------------------------------------
             */
-
             error_log(
-                "Forgot password error: " . $e->getMessage()
+                'Class Management System - Forgot password error: ' .
+                $e->getMessage()
             );
 
-            /*
-            |--------------------------------------------------------------------------
-            | Show safe message to user
-            |--------------------------------------------------------------------------
-            */
-
-            if ($error === "") {
-
+            if ($error === '') {
                 $error =
-                    "Unable to reset the password right now. Please make sure MySQL is running and try again.";
+                    'Unable to reset the password right now. Please try again later.';
             }
         }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Never Keep Reset Key In Form After Submission
+    |--------------------------------------------------------------------------
+    */
+    if ($error !== '') {
+        $reset_key = '';
     }
 }
 
@@ -260,13 +268,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     >
 
     <meta
+        name="robots"
+        content="noindex,nofollow"
+    >
+
+    <meta
         name="description"
         content="Reset administrator password for Class Management System"
     >
 
-    <title>
-        Reset Password - Class Management System
-    </title>
+    <title>Reset Password - Class Management System</title>
 
     <style>
 
@@ -275,21 +286,12 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         body {
-
             margin: 0;
-
             min-height: 100vh;
-
             display: flex;
-
             justify-content: center;
-
             align-items: center;
-
-            font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
 
             background:
                 linear-gradient(
@@ -299,18 +301,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 url("images/login-bg.jpg");
 
             background-size: cover;
-
             background-position: center;
-
             background-attachment: fixed;
 
             padding: 20px;
         }
 
         .box {
-
             width: 430px;
-
             max-width: 100%;
 
             background: rgba(255, 255, 255, 0.98);
@@ -324,119 +322,91 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         .logo-container {
-
             text-align: center;
-
             margin-bottom: 12px;
         }
 
         .logo {
-
             width: 120px;
-
             height: 90px;
-
             object-fit: contain;
         }
 
         h2 {
-
             text-align: center;
-
             margin: 5px 0 8px;
-
             color: #212529;
-
             font-size: 27px;
         }
 
         .subtitle {
-
             text-align: center;
-
             color: #6c757d;
-
             font-size: 14px;
-
             margin: 0 0 25px;
-
             line-height: 1.5;
         }
 
-        .message {
-
-            padding: 13px 14px;
-
+        .security-note {
+            background: #fff3cd;
+            color: #664d03;
+            border: 1px solid #ffecb5;
+            padding: 12px 14px;
             border-radius: 9px;
-
             margin-bottom: 20px;
+            font-size: 13px;
+            line-height: 1.45;
+        }
 
+        .message {
+            padding: 13px 14px;
+            border-radius: 9px;
+            margin-bottom: 20px;
             font-size: 14px;
-
             text-align: center;
-
             line-height: 1.4;
         }
 
         .error {
-
             background: #f8d7da;
-
             color: #842029;
-
             border: 1px solid #f5c2c7;
         }
 
         .success {
-
             background: #d1e7dd;
-
             color: #0f5132;
-
             border: 1px solid #badbcc;
         }
 
         label {
-
             display: block;
-
             margin-bottom: 7px;
-
             font-weight: 600;
-
             color: #343a40;
-
             font-size: 14px;
         }
 
         .input-group {
-
             position: relative;
-
             margin-bottom: 18px;
         }
 
         input {
-
             width: 100%;
-
             padding: 13px 14px;
 
             border: 1px solid #ced4da;
-
             border-radius: 9px;
 
             font-size: 15px;
-
             outline: none;
 
             transition: 0.2s;
-
             background: #fff;
         }
 
         input:focus {
-
             border-color: #0d6efd;
 
             box-shadow:
@@ -444,76 +414,58 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         .password-input {
-
             padding-right: 70px;
         }
 
         .show-button {
-
             position: absolute;
-
             right: 10px;
-
             top: 50%;
 
             transform: translateY(-50%);
 
             border: none;
-
             background: transparent;
 
             color: #0d6efd;
 
             font-weight: 600;
-
             font-size: 13px;
 
             cursor: pointer;
-
             padding: 5px;
         }
 
         .show-button:hover {
-
             color: #084298;
         }
 
         .help-text {
-
             color: #6c757d;
-
             font-size: 12px;
 
             margin-top: -8px;
-
             margin-bottom: 18px;
         }
 
         .reset-button {
-
             width: 100%;
-
             padding: 13px;
 
             background: #0d6efd;
-
             color: white;
 
             border: none;
-
             border-radius: 9px;
 
             font-size: 16px;
-
             font-weight: 600;
 
             cursor: pointer;
-
             transition: 0.2s;
         }
 
         .reset-button:hover {
-
             background: #0b5ed7;
 
             transform: translateY(-1px);
@@ -523,35 +475,27 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         .back-button {
-
             display: block;
-
             text-align: center;
 
             margin-top: 17px;
 
             color: #0d6efd;
-
             text-decoration: none;
 
             font-size: 14px;
-
             font-weight: 600;
         }
 
         .back-button:hover {
-
             text-decoration: underline;
         }
 
         .footer {
-
             text-align: center;
-
             margin-top: 22px;
 
             color: #6c757d;
-
             font-size: 12px;
         }
 
@@ -562,16 +506,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             }
 
             .box {
-
                 padding: 28px 22px;
-
                 border-radius: 16px;
             }
 
             h2 {
                 font-size: 24px;
             }
-
         }
 
     </style>
@@ -592,54 +533,44 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     </div>
 
-    <h2>
-        Reset Password
-    </h2>
+    <h2>Reset Password</h2>
 
     <p class="subtitle">
-        Enter your admin username and create a new password.
+        Reset the administrator password using your secure reset key.
     </p>
 
+    <div class="security-note">
+        The reset key is a private deployment credential.
+        Do not share it publicly or commit it to GitHub.
+    </div>
 
-    <?php if ($error !== ""): ?>
+    <?php if ($error !== ''): ?>
 
         <div class="message error">
-
-            <?php
-            echo htmlspecialchars(
-                $error,
-                ENT_QUOTES,
-                "UTF-8"
-            );
-            ?>
-
+            <?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?>
         </div>
 
     <?php endif; ?>
 
-
-    <?php if ($success !== ""): ?>
+    <?php if ($success !== ''): ?>
 
         <div class="message success">
-
-            <?php
-            echo htmlspecialchars(
-                $success,
-                ENT_QUOTES,
-                "UTF-8"
-            );
-            ?>
-
+            <?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?>
         </div>
 
     <?php endif; ?>
-
 
     <form
         method="POST"
         action=""
         autocomplete="off"
     >
+
+        <input
+            type="hidden"
+            name="csrf_token"
+            value="<?php echo htmlspecialchars($csrf_token, ENT_QUOTES, 'UTF-8'); ?>"
+        >
 
         <label for="username">
             Admin Username
@@ -649,24 +580,43 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             type="text"
             id="username"
             name="username"
-            value="<?php
-                echo htmlspecialchars(
-                    $username,
-                    ENT_QUOTES,
-                    "UTF-8"
-                );
-            ?>"
+            value="<?php echo htmlspecialchars($username, ENT_QUOTES, 'UTF-8'); ?>"
             placeholder="Enter admin username"
             maxlength="50"
             autocomplete="username"
             required
         >
 
-
         <label
-            for="new_password"
+            for="reset_key"
             style="margin-top: 18px;"
         >
+            Administrator Reset Key
+        </label>
+
+        <div class="input-group">
+
+            <input
+                type="password"
+                id="reset_key"
+                name="reset_key"
+                class="password-input"
+                placeholder="Enter reset key"
+                autocomplete="off"
+                required
+            >
+
+            <button
+                type="button"
+                class="show-button"
+                onclick="togglePassword('reset_key', this)"
+            >
+                Show
+            </button>
+
+        </div>
+
+        <label for="new_password">
             New Password
         </label>
 
@@ -694,11 +644,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
         </div>
 
-
         <div class="help-text">
             Password must contain at least 6 characters.
         </div>
-
 
         <label for="confirm_password">
             Confirm New Password
@@ -728,7 +676,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
         </div>
 
-
         <button
             type="submit"
             class="reset-button"
@@ -738,7 +685,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     </form>
 
-
     <a
         href="login.php"
         class="back-button"
@@ -746,39 +692,29 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         ← Back to Login
     </a>
 
-
     <div class="footer">
-
-        © <?php echo date("Y"); ?>
-
+        © <?php echo date('Y'); ?>
         Class Management System
-
     </div>
 
 </div>
-
 
 <script>
 
 function togglePassword(inputId, button) {
 
-    const input =
-        document.getElementById(inputId);
+    const input = document.getElementById(inputId);
 
-    if (input.type === "password") {
+    if (input.type === 'password') {
 
-        input.type = "text";
-
-        button.textContent = "Hide";
+        input.type = 'text';
+        button.textContent = 'Hide';
 
     } else {
 
-        input.type = "password";
-
-        button.textContent = "Show";
-
+        input.type = 'password';
+        button.textContent = 'Show';
     }
-
 }
 
 </script>

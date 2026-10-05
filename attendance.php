@@ -1,123 +1,172 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database Configuration
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
 
-$admin_name = $_SESSION['admin'] ?? 'Administrator';
-
-$admin_name = htmlspecialchars(
-    $admin_name,
-    ENT_QUOTES,
-    'UTF-8'
-);
-
-$search = trim($_GET['search'] ?? '');
-
-
-// ----------------------------------------------------
-// Fetch Attendance Records
-// ----------------------------------------------------
-
-if ($search !== '') {
-
-    $search_like = '%' . $search . '%';
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            student_id,
-            student_name,
-            attendance_date,
-            status
-         FROM attendance
-         WHERE student_name LIKE ?
-            OR status LIKE ?
-            OR attendance_date LIKE ?
-         ORDER BY attendance_date DESC, id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load attendance records.");
-    }
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "sss",
-        $search_like,
-        $search_like,
-        $search_like
-    );
-
-    mysqli_stmt_execute($stmt);
-
-    $result = mysqli_stmt_get_result($stmt);
-
-} else {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            student_id,
-            student_name,
-            attendance_date,
-            status
-         FROM attendance
-         ORDER BY attendance_date DESC, id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load attendance records.");
-    }
-
-    mysqli_stmt_execute($stmt);
-
-    $result = mysqli_stmt_get_result($stmt);
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
+$csrf_token = $_SESSION['csrf_token'];
 
-// ----------------------------------------------------
-// Count Records
-// ----------------------------------------------------
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
+$admin_name = (string) ($_SESSION['admin'] ?? 'Administrator');
 
+/*
+|--------------------------------------------------------------------------
+| Search
+|--------------------------------------------------------------------------
+*/
+$search = trim((string) ($_GET['search'] ?? ''));
+
+if (mb_strlen($search) > 100) {
+    $search = mb_substr($search, 0, 100);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Variables
+|--------------------------------------------------------------------------
+*/
+$attendance_records = [];
 $total_records = 0;
-
-if ($result) {
-    $total_records = mysqli_num_rows($result);
-}
-
-
-// ----------------------------------------------------
-// Attendance Statistics
-// ----------------------------------------------------
-
 $present_count = 0;
 $absent_count = 0;
+$database_error = '';
 
-if ($result && $total_records > 0) {
+/*
+|--------------------------------------------------------------------------
+| Fetch Attendance Records
+|--------------------------------------------------------------------------
+*/
+try {
 
-    mysqli_data_seek($result, 0);
+    if ($search !== '') {
 
-    while ($stat_row = mysqli_fetch_assoc($result)) {
+        $search_like = '%' . $search . '%';
 
-        if ($stat_row['status'] === 'Present') {
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                student_id,
+                student_name,
+                attendance_date,
+                status
+             FROM attendance
+             WHERE student_name LIKE ?
+                OR status LIKE ?
+                OR attendance_date LIKE ?
+             ORDER BY attendance_date DESC, id DESC'
+        );
+
+        $stmt->bind_param(
+            'sss',
+            $search_like,
+            $search_like,
+            $search_like
+        );
+
+    } else {
+
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                student_id,
+                student_name,
+                attendance_date,
+                status
+             FROM attendance
+             ORDER BY attendance_date DESC, id DESC'
+        );
+    }
+
+    $stmt->execute();
+
+    $stmt->bind_result(
+        $record_id,
+        $student_id,
+        $student_name,
+        $attendance_date,
+        $status
+    );
+
+    while ($stmt->fetch()) {
+
+        $record = [
+            'id' => (int) $record_id,
+            'student_id' => (int) $student_id,
+            'student_name' => (string) $student_name,
+            'attendance_date' => (string) $attendance_date,
+            'status' => (string) $status
+        ];
+
+        $attendance_records[] = $record;
+
+        $total_records++;
+
+        if ($status === 'Present') {
             $present_count++;
-        }
-
-        if ($stat_row['status'] === 'Absent') {
+        } elseif ($status === 'Absent') {
             $absent_count++;
         }
     }
 
-    mysqli_data_seek($result, 0);
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Attendance Load Error: ' .
+        $e->getMessage()
+    );
+
+    $database_error =
+        'Unable to load attendance records. Please try again later.';
 }
+
+/*
+|--------------------------------------------------------------------------
+| Flash Messages
+|--------------------------------------------------------------------------
+*/
+$delete_success = $_SESSION['attendance_delete_success'] ?? '';
+$delete_error = $_SESSION['attendance_delete_error'] ?? '';
+
+unset(
+    $_SESSION['attendance_delete_success'],
+    $_SESSION['attendance_delete_error']
+);
 
 ?>
 
@@ -131,6 +180,11 @@ if ($result && $total_records > 0) {
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
     >
 
     <title>
@@ -159,8 +213,6 @@ if ($result && $total_records > 0) {
             font-family: Arial, Helvetica, sans-serif;
             color: #212529;
         }
-
-        /* SIDEBAR */
 
         .sidebar {
             position: fixed;
@@ -253,16 +305,10 @@ if ($result && $total_records > 0) {
             color: white;
         }
 
-
-        /* MAIN */
-
         .main-content {
             margin-left: 250px;
             min-height: 100vh;
         }
-
-
-        /* TOPBAR */
 
         .topbar {
             height: 70px;
@@ -299,9 +345,6 @@ if ($result && $total_records > 0) {
             font-size: 18px;
         }
 
-
-        /* CONTENT */
-
         .content-area {
             padding: 30px;
         }
@@ -330,9 +373,6 @@ if ($result && $total_records > 0) {
             display: flex;
             gap: 10px;
         }
-
-
-        /* STAT CARDS */
 
         .stat-card {
             background: white;
@@ -380,9 +420,6 @@ if ($result && $total_records > 0) {
             margin-top: 3px;
         }
 
-
-        /* SEARCH */
-
         .search-card {
             background: white;
             border: 1px solid #e5e7eb;
@@ -414,9 +451,6 @@ if ($result && $total_records > 0) {
             margin-top: 15px;
             font-size: 14px;
         }
-
-
-        /* TABLE */
 
         .table-card {
             background: white;
@@ -506,8 +540,9 @@ if ($result && $total_records > 0) {
             margin-bottom: 3px;
         }
 
-
-        /* EMPTY */
+        .delete-form {
+            display: inline;
+        }
 
         .empty-state {
             text-align: center;
@@ -526,18 +561,12 @@ if ($result && $total_records > 0) {
             margin-bottom: 6px;
         }
 
-
-        /* FOOTER */
-
         .footer {
             text-align: center;
             color: #9ca3af;
             font-size: 13px;
             padding: 25px 20px;
         }
-
-
-        /* RESPONSIVE */
 
         @media (max-width: 992px) {
 
@@ -552,9 +581,7 @@ if ($result && $total_records > 0) {
             .content-area {
                 padding: 20px;
             }
-
         }
-
 
         @media (max-width: 768px) {
 
@@ -592,9 +619,7 @@ if ($result && $total_records > 0) {
             .admin-profile span {
                 display: none;
             }
-
         }
-
 
         @media (max-width: 576px) {
 
@@ -613,16 +638,13 @@ if ($result && $total_records > 0) {
             .table-header {
                 padding: 15px;
             }
-
         }
 
     </style>
 
 </head>
 
-
 <body>
-
 
 <!-- SIDEBAR -->
 
@@ -638,66 +660,54 @@ if ($result && $total_records > 0) {
 
             <h5>Class Management</h5>
 
-            <small>
-                Admin Panel
-            </small>
+            <small>Admin Panel</small>
 
         </div>
 
     </div>
 
-
     <div class="nav-title">
         Main Menu
     </div>
-
 
     <a href="dashboard.php">
         <i class="bi bi-grid-1x2-fill"></i>
         Dashboard
     </a>
 
-
     <a href="students.php">
         <i class="bi bi-people-fill"></i>
         Students
     </a>
-
 
     <a href="teachers.php">
         <i class="bi bi-person-workspace"></i>
         Teachers
     </a>
 
-
     <a href="subjects.php">
         <i class="bi bi-book-fill"></i>
         Subjects
     </a>
-
 
     <a href="attendance.php" class="active">
         <i class="bi bi-calendar-check-fill"></i>
         Attendance
     </a>
 
-
     <a href="marks.php">
         <i class="bi bi-bar-chart-fill"></i>
         Marks
     </a>
-
 
     <a href="reports.php">
         <i class="bi bi-file-earmark-bar-graph-fill"></i>
         Reports
     </a>
 
-
     <div class="nav-title">
         Account
     </div>
-
 
     <a href="logout.php" class="logout-link">
         <i class="bi bi-box-arrow-right"></i>
@@ -706,11 +716,9 @@ if ($result && $total_records > 0) {
 
 </aside>
 
-
 <!-- MAIN -->
 
 <main class="main-content">
-
 
     <!-- TOPBAR -->
 
@@ -720,7 +728,6 @@ if ($result && $total_records > 0) {
             Attendance Management
         </div>
 
-
         <div class="admin-profile">
 
             <div class="admin-icon">
@@ -728,18 +735,22 @@ if ($result && $total_records > 0) {
             </div>
 
             <span>
-                <?php echo $admin_name; ?>
+                <?php
+                echo htmlspecialchars(
+                    $admin_name,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
             </span>
 
         </div>
 
     </div>
 
-
     <!-- CONTENT -->
 
     <div class="content-area">
-
 
         <!-- HEADER -->
 
@@ -757,7 +768,6 @@ if ($result && $total_records > 0) {
 
             </div>
 
-
             <div class="header-actions">
 
                 <a
@@ -767,7 +777,6 @@ if ($result && $total_records > 0) {
                     <i class="bi bi-arrow-left"></i>
                     Dashboard
                 </a>
-
 
                 <a
                     href="mark_attendance.php"
@@ -781,20 +790,92 @@ if ($result && $total_records > 0) {
 
         </div>
 
+        <!-- FLASH MESSAGES -->
+
+        <?php if ($delete_success !== ''): ?>
+
+            <div
+                class="alert alert-success alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-check-circle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    (string) $delete_success,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($delete_error !== ''): ?>
+
+            <div
+                class="alert alert-danger alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    (string) $delete_error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($database_error !== ''): ?>
+
+            <div
+                class="alert alert-danger"
+                role="alert"
+            >
+                <i class="bi bi-database-x me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $database_error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+            </div>
+
+        <?php endif; ?>
 
         <!-- STATISTICS -->
 
         <div class="row g-3">
-
 
             <div class="col-md-4">
 
                 <div class="stat-card">
 
                     <div class="stat-icon blue">
-
                         <i class="bi bi-calendar-check"></i>
-
                     </div>
 
                     <div class="stat-label">
@@ -809,15 +890,12 @@ if ($result && $total_records > 0) {
 
             </div>
 
-
             <div class="col-md-4">
 
                 <div class="stat-card">
 
                     <div class="stat-icon green">
-
                         <i class="bi bi-check-circle-fill"></i>
-
                     </div>
 
                     <div class="stat-label">
@@ -832,15 +910,12 @@ if ($result && $total_records > 0) {
 
             </div>
 
-
             <div class="col-md-4">
 
                 <div class="stat-card">
 
                     <div class="stat-icon red">
-
                         <i class="bi bi-x-circle-fill"></i>
-
                     </div>
 
                     <div class="stat-label">
@@ -855,9 +930,7 @@ if ($result && $total_records > 0) {
 
             </div>
 
-
         </div>
-
 
         <!-- SEARCH -->
 
@@ -870,31 +943,33 @@ if ($result && $total_records > 0) {
 
                 <div class="row g-3 align-items-end">
 
-
                     <div class="col-lg-10">
 
-                        <label class="search-label">
+                        <label
+                            for="attendance-search"
+                            class="search-label"
+                        >
                             Search Attendance
                         </label>
 
                         <input
                             type="text"
+                            id="attendance-search"
                             name="search"
                             class="form-control search-input"
                             placeholder="Search by student name, date or status..."
                             value="<?php
-
                             echo htmlspecialchars(
                                 $search,
                                 ENT_QUOTES,
                                 'UTF-8'
                             );
-
                             ?>"
+                            maxlength="100"
+                            autocomplete="off"
                         >
 
                     </div>
-
 
                     <div class="col-lg-2">
 
@@ -908,13 +983,11 @@ if ($result && $total_records > 0) {
 
                     </div>
 
-
                 </div>
 
             </form>
 
-
-            <?php if ($search !== '') { ?>
+            <?php if ($search !== ''): ?>
 
                 <div class="search-info">
 
@@ -924,25 +997,18 @@ if ($result && $total_records > 0) {
 
                     <strong>
                         "<?php
-
                         echo htmlspecialchars(
                             $search,
                             ENT_QUOTES,
                             'UTF-8'
                         );
-
                         ?>"
                     </strong>
 
-
                     <span class="badge bg-primary ms-2">
-
                         <?php echo $total_records; ?>
-
                         found
-
                     </span>
-
 
                     <a
                         href="attendance.php"
@@ -954,15 +1020,13 @@ if ($result && $total_records > 0) {
 
                 </div>
 
-            <?php } ?>
+            <?php endif; ?>
 
         </div>
-
 
         <!-- TABLE -->
 
         <div class="table-card">
-
 
             <div class="table-header">
 
@@ -974,12 +1038,11 @@ if ($result && $total_records > 0) {
 
                 </h5>
 
-
                 <span class="badge bg-light text-dark border">
 
                     <?php echo $total_records; ?>
 
-                    <?php echo ($total_records == 1)
+                    <?php echo ($total_records === 1)
                         ? 'Record'
                         : 'Records'; ?>
 
@@ -987,255 +1050,220 @@ if ($result && $total_records > 0) {
 
             </div>
 
-
             <div class="table-wrapper">
 
                 <table class="table">
-
 
                     <thead>
 
                         <tr>
 
-                            <th>
-                                ID
-                            </th>
+                            <th>ID</th>
 
-                            <th>
-                                Student
-                            </th>
+                            <th>Student</th>
 
-                            <th>
-                                Date
-                            </th>
+                            <th>Date</th>
 
-                            <th>
-                                Status
-                            </th>
+                            <th>Status</th>
 
-                            <th>
-                                Actions
-                            </th>
+                            <th>Actions</th>
 
                         </tr>
 
                     </thead>
 
-
                     <tbody>
 
+                    <?php if ($total_records > 0): ?>
 
-                    <?php
+                        <?php foreach ($attendance_records as $row): ?>
 
-                    if ($result && $total_records > 0) {
+                            <?php
+                            $record_id = (int) $row['id'];
+                            $student_id = (int) $row['student_id'];
+                            $student_name = $row['student_name'];
+                            $attendance_date = $row['attendance_date'];
+                            $status = $row['status'];
+                            ?>
 
-                        while ($row = mysqli_fetch_assoc($result)) {
+                            <tr>
 
-                            $record_id =
-                                (int)$row['id'];
+                                <!-- ID -->
 
-                            $student_id =
-                                (int)$row['student_id'];
+                                <td>
+                                    <strong>
+                                        #<?php echo $record_id; ?>
+                                    </strong>
+                                </td>
 
-                            $student_name =
-                                $row['student_name'];
+                                <!-- STUDENT -->
 
-                            $attendance_date =
-                                $row['attendance_date'];
+                                <td>
 
-                            $status =
-                                $row['status'];
+                                    <div class="d-flex align-items-center">
 
-                    ?>
+                                        <div class="student-icon">
+                                            <i class="bi bi-person-fill"></i>
+                                        </div>
 
+                                        <div>
 
-                        <tr>
+                                            <div class="student-name">
 
+                                                <?php
+                                                echo htmlspecialchars(
+                                                    $student_name,
+                                                    ENT_QUOTES,
+                                                    'UTF-8'
+                                                );
+                                                ?>
 
-                            <!-- ID -->
-
-                            <td>
-
-                                <strong>
-                                    #<?php echo $record_id; ?>
-                                </strong>
-
-                            </td>
-
-
-                            <!-- STUDENT -->
-
-                            <td>
-
-                                <div class="d-flex align-items-center">
-
-                                    <div class="student-icon">
-
-                                        <i class="bi bi-person-fill"></i>
-
-                                    </div>
-
-
-                                    <div>
-
-                                        <div class="student-name">
-
-                                            <?php
-
-                                            echo htmlspecialchars(
-                                                $student_name,
-                                                ENT_QUOTES,
-                                                'UTF-8'
-                                            );
-
-                                            ?>
+                                            </div>
 
                                         </div>
 
                                     </div>
 
-                                </div>
+                                </td>
 
-                            </td>
+                                <!-- DATE -->
 
+                                <td>
 
-                            <!-- DATE -->
+                                    <span class="date-text">
 
-                            <td>
-
-                                <span class="date-text">
-
-                                    <i class="bi bi-calendar3 me-1"></i>
-
-                                    <?php
-
-                                    echo htmlspecialchars(
-                                        $attendance_date,
-                                        ENT_QUOTES,
-                                        'UTF-8'
-                                    );
-
-                                    ?>
-
-                                </span>
-
-                            </td>
-
-
-                            <!-- STATUS -->
-
-                            <td>
-
-
-                                <?php if ($status === 'Present') { ?>
-
-
-                                    <span class="badge bg-success status-badge">
-
-                                        <i class="bi bi-check-circle me-1"></i>
-
-                                        Present
-
-                                    </span>
-
-
-                                <?php } elseif ($status === 'Absent') { ?>
-
-
-                                    <span class="badge bg-danger status-badge">
-
-                                        <i class="bi bi-x-circle me-1"></i>
-
-                                        Absent
-
-                                    </span>
-
-
-                                <?php } else { ?>
-
-
-                                    <span class="badge bg-secondary status-badge">
+                                        <i class="bi bi-calendar3 me-1"></i>
 
                                         <?php
-
                                         echo htmlspecialchars(
-                                            $status,
+                                            $attendance_date,
                                             ENT_QUOTES,
                                             'UTF-8'
                                         );
-
                                         ?>
 
                                     </span>
 
+                                </td>
 
-                                <?php } ?>
+                                <!-- STATUS -->
 
+                                <td>
 
-                            </td>
+                                    <?php if ($status === 'Present'): ?>
 
+                                        <span
+                                            class="badge bg-success status-badge"
+                                        >
+                                            <i class="bi bi-check-circle me-1"></i>
+                                            Present
+                                        </span>
 
-                            <!-- ACTIONS -->
+                                    <?php elseif ($status === 'Absent'): ?>
 
-                            <td class="action-buttons">
+                                        <span
+                                            class="badge bg-danger status-badge"
+                                        >
+                                            <i class="bi bi-x-circle me-1"></i>
+                                            Absent
+                                        </span>
 
+                                    <?php else: ?>
 
-                                <?php if ($student_id > 0) { ?>
+                                        <span
+                                            class="badge bg-secondary status-badge"
+                                        >
+                                            <?php
+                                            echo htmlspecialchars(
+                                                $status,
+                                                ENT_QUOTES,
+                                                'UTF-8'
+                                            );
+                                            ?>
+                                        </span>
+
+                                    <?php endif; ?>
+
+                                </td>
+
+                                <!-- ACTIONS -->
+
+                                <td class="action-buttons">
+
+                                    <?php if ($student_id > 0): ?>
+
+                                        <a
+                                            href="attendance_report.php?student_id=<?php echo $student_id; ?>"
+                                            class="btn btn-sm btn-outline-success"
+                                        >
+                                            <i class="bi bi-file-earmark-text"></i>
+                                            Report
+                                        </a>
+
+                                    <?php else: ?>
+
+                                        <a
+                                            href="attendance_report.php"
+                                            class="btn btn-sm btn-outline-success"
+                                        >
+                                            <i class="bi bi-file-earmark-text"></i>
+                                            Report
+                                        </a>
+
+                                    <?php endif; ?>
 
                                     <a
-                                        href="attendance_report.php?student_id=<?php echo $student_id; ?>"
-                                        class="btn btn-sm btn-outline-success"
+                                        href="edit_attendance.php?id=<?php echo $record_id; ?>"
+                                        class="btn btn-sm btn-outline-warning"
                                     >
-                                        <i class="bi bi-file-earmark-text"></i>
-                                        Report
+                                        <i class="bi bi-pencil-square"></i>
+                                        Edit
                                     </a>
 
-                                <?php } else { ?>
+                                    <!-- DELETE MUST BE POST -->
 
-                                    <a
-                                        href="attendance_report.php"
-                                        class="btn btn-sm btn-outline-success"
+                                    <form
+                                        method="POST"
+                                        action="delete_attendance.php"
+                                        class="delete-form"
+                                        onsubmit="return confirm('Are you sure you want to delete this attendance record?');"
                                     >
-                                        <i class="bi bi-file-earmark-text"></i>
-                                        Report
-                                    </a>
 
-                                <?php } ?>
+                                        <input
+                                            type="hidden"
+                                            name="id"
+                                            value="<?php echo $record_id; ?>"
+                                        >
 
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php
+                                            echo htmlspecialchars(
+                                                $csrf_token,
+                                                ENT_QUOTES,
+                                                'UTF-8'
+                                            );
+                                            ?>"
+                                        >
 
-                                <a
-                                    href="edit_attendance.php?id=<?php echo $record_id; ?>"
-                                    class="btn btn-sm btn-outline-warning"
-                                >
-                                    <i class="bi bi-pencil-square"></i>
-                                    Edit
-                                </a>
+                                        <button
+                                            type="submit"
+                                            class="btn btn-sm btn-outline-danger"
+                                        >
+                                            <i class="bi bi-trash3"></i>
+                                            Delete
+                                        </button>
 
+                                    </form>
 
-                                <a
-                                    href="delete_attendance.php?id=<?php echo $record_id; ?>"
-                                    class="btn btn-sm btn-outline-danger"
-                                    onclick="return confirm('Are you sure you want to delete this attendance record?');"
-                                >
-                                    <i class="bi bi-trash3"></i>
-                                    Delete
-                                </a>
+                                </td>
 
+                            </tr>
 
-                            </td>
+                        <?php endforeach; ?>
 
-
-                        </tr>
-
-
-                    <?php
-
-                        }
-
-                    } else {
-
-                    ?>
-
+                    <?php else: ?>
 
                         <tr>
 
@@ -1250,28 +1278,25 @@ if ($result && $total_records > 0) {
 
                                 </div>
 
-
                                 <h5>
                                     No Attendance Records Found
                                 </h5>
 
-
                                 <p class="mb-3">
 
-                                    <?php if ($search !== '') { ?>
+                                    <?php if ($search !== ''): ?>
 
                                         No attendance records matched your search.
 
-                                    <?php } else { ?>
+                                    <?php else: ?>
 
                                         No attendance records have been added yet.
 
-                                    <?php } ?>
+                                    <?php endif; ?>
 
                                 </p>
 
-
-                                <?php if ($search === '') { ?>
+                                <?php if ($search === ''): ?>
 
                                     <a
                                         href="mark_attendance.php"
@@ -1281,7 +1306,7 @@ if ($result && $total_records > 0) {
                                         Mark Attendance
                                     </a>
 
-                                <?php } else { ?>
+                                <?php else: ?>
 
                                     <a
                                         href="attendance.php"
@@ -1291,15 +1316,13 @@ if ($result && $total_records > 0) {
                                         Clear Search
                                     </a>
 
-                                <?php } ?>
+                                <?php endif; ?>
 
                             </td>
 
                         </tr>
 
-
-                    <?php } ?>
-
+                    <?php endif; ?>
 
                     </tbody>
 
@@ -1309,15 +1332,13 @@ if ($result && $total_records > 0) {
 
         </div>
 
-
     </div>
-
 
     <!-- FOOTER -->
 
     <div class="footer">
 
-        © 2026 Class Management System
+        © <?php echo date('Y'); ?> Class Management System
 
         <br>
 
@@ -1325,17 +1346,11 @@ if ($result && $total_records > 0) {
 
     </div>
 
-
 </main>
 
-
-<?php
-
-if (isset($stmt) && $stmt) {
-    mysqli_stmt_close($stmt);
-}
-
-?>
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+></script>
 
 </body>
 

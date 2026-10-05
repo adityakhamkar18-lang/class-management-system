@@ -1,208 +1,326 @@
 <?php
+
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Class Management System - Add Student
+|--------------------------------------------------------------------------
+| Adds a new student to the students table.
+|--------------------------------------------------------------------------
+*/
+
+// -------------------------------------------------------------------------
+// Authentication
+// -------------------------------------------------------------------------
+
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+// -------------------------------------------------------------------------
+// Database
+// -------------------------------------------------------------------------
 
-// ----------------------------------------------------
+require_once __DIR__ . '/config.php';
+
+// -------------------------------------------------------------------------
+// CSRF protection
+// -------------------------------------------------------------------------
+
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION['csrf_token'];
+
+// -------------------------------------------------------------------------
 // Initialize variables
-// ----------------------------------------------------
-$error = "";
+// -------------------------------------------------------------------------
 
-$roll_no = "";
-$name = "";
-$email = "";
-$phone = "";
-$gender = "";
-$class_name = "";
+$error = '';
 
-// ----------------------------------------------------
+$roll_no = '';
+$name = '';
+$email = '';
+$phone = '';
+$gender = '';
+$class_name = '';
+
+// -------------------------------------------------------------------------
 // Process form submission
-// ----------------------------------------------------
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
+// -------------------------------------------------------------------------
 
-    // Get and clean form data
-    $roll_no = trim($_POST["roll_no"] ?? "");
-    $name = trim($_POST["name"] ?? "");
-    $email = trim($_POST["email"] ?? "");
-    $phone = trim($_POST["phone"] ?? "");
-    $gender = trim($_POST["gender"] ?? "");
-    $class_name = trim($_POST["class_name"] ?? "");
-    $password = $_POST["password"] ?? "";
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['save'])
+) {
 
-    // ------------------------------------------------
-    // Validate Roll Number
-    // ------------------------------------------------
-    if ($roll_no === "") {
+    // -------------------------------------------------------------
+    // Verify CSRF token
+    // -------------------------------------------------------------
 
-        $error = "Please enter the roll number.";
+    $submitted_token = (string) (
+        $_POST['csrf_token'] ?? ''
+    );
 
-    }
-
-    // ------------------------------------------------
-    // Validate Name
-    // ------------------------------------------------
-    elseif ($name === "") {
-
-        $error = "Please enter the student's name.";
-
-    }
-
-    elseif (strlen($name) < 2) {
-
-        $error = "Student name must contain at least 2 characters.";
-
-    }
-
-    // ------------------------------------------------
-    // Validate Email
-    // ------------------------------------------------
-    elseif ($email !== "" && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-
-        $error = "Please enter a valid email address.";
-
-    }
-
-    // ------------------------------------------------
-    // Validate Phone
-    // ------------------------------------------------
-    elseif ($phone !== "" && !preg_match('/^[0-9]{10}$/', $phone)) {
-
-        $error = "Phone number must contain exactly 10 digits.";
-
-    }
-
-    // ------------------------------------------------
-    // Validate Gender
-    // ------------------------------------------------
-    elseif (
-        $gender !== "" &&
-        !in_array($gender, ["Male", "Female"], true)
+    if (
+        $submitted_token === '' ||
+        !hash_equals($csrf_token, $submitted_token)
     ) {
 
-        $error = "Please select a valid gender.";
+        $error = 'Invalid form request. Please refresh the page and try again.';
 
-    }
+    } else {
 
-    // ------------------------------------------------
-    // Validate Class
-    // ------------------------------------------------
-    elseif ($class_name === "") {
+        // ---------------------------------------------------------
+        // Get and clean form data
+        // ---------------------------------------------------------
 
-        $error = "Please enter the class.";
-
-    }
-
-    // ------------------------------------------------
-    // Validate Password
-    // ------------------------------------------------
-    elseif ($password === "") {
-
-        $error = "Please enter a password.";
-
-    }
-
-    elseif (strlen($password) < 6) {
-
-        $error = "Password must contain at least 6 characters.";
-
-    }
-
-    else {
-
-        // ------------------------------------------------
-        // Check duplicate Roll Number
-        // ------------------------------------------------
-        $check_stmt = mysqli_prepare(
-            $conn,
-            "SELECT id FROM students WHERE roll_no = ? LIMIT 1"
+        $roll_no = trim(
+            (string) ($_POST['roll_no'] ?? '')
         );
 
-        if (!$check_stmt) {
+        $name = trim(
+            (string) ($_POST['name'] ?? '')
+        );
 
-            $error = "Database error. Please try again.";
+        $email = trim(
+            (string) ($_POST['email'] ?? '')
+        );
 
-        } else {
+        $phone = trim(
+            (string) ($_POST['phone'] ?? '')
+        );
 
-            mysqli_stmt_bind_param(
-                $check_stmt,
-                "s",
-                $roll_no
-            );
+        $gender = trim(
+            (string) ($_POST['gender'] ?? '')
+        );
 
-            mysqli_stmt_execute($check_stmt);
+        $class_name = trim(
+            (string) ($_POST['class_name'] ?? '')
+        );
 
-            $check_result = mysqli_stmt_get_result($check_stmt);
+        // ---------------------------------------------------------
+        // Validate Roll Number
+        // ---------------------------------------------------------
 
-            if (
-                $check_result &&
-                mysqli_num_rows($check_result) > 0
-            ) {
+        if ($roll_no === '') {
 
-                $error = "This roll number already exists.";
+            $error = 'Please enter the roll number.';
 
-            }
+        } elseif (strlen($roll_no) > 50) {
 
-            mysqli_stmt_close($check_stmt);
+            $error = 'Roll number must not exceed 50 characters.';
+
         }
 
-        // ------------------------------------------------
-        // Insert Student
-        // ------------------------------------------------
-        if ($error === "") {
+        // ---------------------------------------------------------
+        // Validate Name
+        // ---------------------------------------------------------
 
-            // Hash password before storing it
-            $hashed_password = password_hash(
-                $password,
-                PASSWORD_DEFAULT
-            );
+        elseif ($name === '') {
 
-            $insert_stmt = mysqli_prepare(
-                $conn,
-                "INSERT INTO students
-                (roll_no, name, email, phone, gender, class_name, password)
-                VALUES (?, ?, ?, ?, ?, ?, ?)"
-            );
+            $error = "Please enter the student's name.";
 
-            if (!$insert_stmt) {
+        } elseif (strlen($name) < 2) {
 
-                $error = "Unable to prepare database request.";
+            $error = 'Student name must contain at least 2 characters.';
 
-            } else {
+        } elseif (strlen($name) > 100) {
 
-                mysqli_stmt_bind_param(
-                    $insert_stmt,
-                    "sssssss",
-                    $roll_no,
-                    $name,
-                    $email,
-                    $phone,
-                    $gender,
-                    $class_name,
-                    $hashed_password
+            $error = 'Student name must not exceed 100 characters.';
+
+        }
+
+        // ---------------------------------------------------------
+        // Validate Email
+        // ---------------------------------------------------------
+
+        elseif ($email !== '' && strlen($email) > 150) {
+
+            $error = 'Email address must not exceed 150 characters.';
+
+        } elseif (
+            $email !== '' &&
+            !filter_var($email, FILTER_VALIDATE_EMAIL)
+        ) {
+
+            $error = 'Please enter a valid email address.';
+
+        }
+
+        // ---------------------------------------------------------
+        // Validate Phone
+        // ---------------------------------------------------------
+
+        elseif ($phone !== '' && !preg_match('/^[0-9]{10}$/', $phone)) {
+
+            $error = 'Phone number must contain exactly 10 digits.';
+
+        }
+
+        // ---------------------------------------------------------
+        // Validate Gender
+        // ---------------------------------------------------------
+
+        elseif (
+            $gender !== '' &&
+            !in_array(
+                $gender,
+                ['Male', 'Female'],
+                true
+            )
+        ) {
+
+            $error = 'Please select a valid gender.';
+
+        }
+
+        // ---------------------------------------------------------
+        // Validate Class
+        // ---------------------------------------------------------
+
+        elseif ($class_name === '') {
+
+            $error = 'Please enter the class.';
+
+        } elseif (strlen($class_name) > 100) {
+
+            $error = 'Class name must not exceed 100 characters.';
+
+        }
+
+        // ---------------------------------------------------------
+        // Database operations
+        // ---------------------------------------------------------
+
+        if ($error === '') {
+
+            try {
+
+                // -------------------------------------------------
+                // Check duplicate roll number
+                // -------------------------------------------------
+
+                $check_stmt = $conn->prepare(
+                    'SELECT id FROM students WHERE roll_no = ? LIMIT 1'
                 );
 
-                if (mysqli_stmt_execute($insert_stmt)) {
+                $check_stmt->bind_param(
+                    's',
+                    $roll_no
+                );
 
-                    mysqli_stmt_close($insert_stmt);
+                $check_stmt->execute();
 
-                    header("Location: students.php");
-                    exit();
+                $check_stmt->store_result();
+
+                if ($check_stmt->num_rows > 0) {
+
+                    $error = 'This roll number already exists.';
+
+                }
+
+                $check_stmt->close();
+
+                // -------------------------------------------------
+                // Insert student
+                // -------------------------------------------------
+
+                if ($error === '') {
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | IMPORTANT
+                    |--------------------------------------------------------------------------
+                    | No password is stored for students.
+                    | Only the administrator needs authentication.
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $insert_stmt = $conn->prepare(
+                        'INSERT INTO students
+                        (
+                            roll_no,
+                            name,
+                            email,
+                            phone,
+                            gender,
+                            class_name
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)'
+                    );
+
+                    $insert_stmt->bind_param(
+                        'ssssss',
+                        $roll_no,
+                        $name,
+                        $email,
+                        $phone,
+                        $gender,
+                        $class_name
+                    );
+
+                    $insert_stmt->execute();
+
+                    $insert_stmt->close();
+
+                    // -------------------------------------------------
+                    // Success
+                    // -------------------------------------------------
+
+                    header('Location: students.php');
+                    exit;
+                }
+
+            } catch (mysqli_sql_exception $e) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Database errors are logged privately.
+                | Technical database information is never shown to visitors.
+                |--------------------------------------------------------------------------
+                */
+
+                error_log(
+                    'Class Management System - Add student database error: ' .
+                    $e->getMessage()
+                );
+
+                /*
+                |--------------------------------------------------------------------------
+                | Duplicate-key protection
+                |--------------------------------------------------------------------------
+                | If roll_no is made UNIQUE in the database, this catches
+                | a duplicate even if another request creates the same
+                | roll number at the same time.
+                |--------------------------------------------------------------------------
+                */
+
+                if ((int) $e->getCode() === 1062) {
+
+                    $error = 'This roll number already exists.';
 
                 } else {
 
-                    $error = "Unable to save student. Please try again.";
-
-                    mysqli_stmt_close($insert_stmt);
+                    $error = 'Unable to save the student. Please try again later.';
                 }
             }
         }
     }
 }
+
 ?>
 
 <!DOCTYPE html>
@@ -217,7 +335,12 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Add Student - Class Management System</title>
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <title>Add Student | Class Management System</title>
 
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -226,27 +349,50 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
     <style>
 
+        * {
+            box-sizing: border-box;
+        }
+
         body {
+            margin: 0;
             background-color: #f5f7fb;
             min-height: 100vh;
+            font-family: "Segoe UI", Arial, sans-serif;
+        }
+
+        .page-wrapper {
+            min-height: 100vh;
+            padding: 40px 15px;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
         }
 
         .form-card {
+            width: 100%;
             max-width: 650px;
-            margin: 40px auto;
             background: #ffffff;
             padding: 35px;
             border-radius: 15px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e5e7eb;
         }
 
         .page-title {
-            font-weight: 600;
+            font-weight: 700;
             color: #212529;
+            margin-bottom: 5px;
+        }
+
+        .page-subtitle {
+            color: #6b7280;
+            font-size: 14px;
+            margin-bottom: 25px;
         }
 
         .form-label {
-            font-weight: 500;
+            font-weight: 600;
+            color: #374151;
         }
 
         .form-control,
@@ -257,6 +403,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
         .form-control:focus,
         .form-select:focus {
+            border-color: #0d6efd;
             box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.15);
         }
 
@@ -266,40 +413,93 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             flex-wrap: wrap;
         }
 
+        .button-group .btn {
+            min-width: 130px;
+        }
+
+        .form-text {
+            font-size: 12px;
+        }
+
+        @media (max-width: 576px) {
+
+            .page-wrapper {
+                padding: 20px 12px;
+            }
+
+            .form-card {
+                padding: 25px 20px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .button-group .btn {
+                width: 100%;
+            }
+        }
+
     </style>
 
 </head>
 
 <body>
 
-<div class="container">
+<div class="page-wrapper">
 
     <div class="form-card">
 
-        <h2 class="page-title mb-4">
+        <h2 class="page-title">
             Add Student
         </h2>
 
-        <?php if ($error !== "") { ?>
+        <p class="page-subtitle">
+            Enter the student's information below.
+        </p>
+
+        <?php if ($error !== '') { ?>
 
             <div
                 class="alert alert-danger"
                 role="alert"
             >
+
                 <?php
                 echo htmlspecialchars(
                     $error,
                     ENT_QUOTES,
-                    "UTF-8"
+                    'UTF-8'
                 );
                 ?>
+
             </div>
 
         <?php } ?>
 
-        <form method="POST" action="">
+        <form
+            method="POST"
+            action=""
+            autocomplete="off"
+        >
+
+            <!-- CSRF Token -->
+
+            <input
+                type="hidden"
+                name="csrf_token"
+                value="<?php
+                    echo htmlspecialchars(
+                        $csrf_token,
+                        ENT_QUOTES,
+                        'UTF-8'
+                    );
+                ?>"
+            >
+
 
             <!-- Roll Number -->
+
             <div class="mb-3">
 
                 <label
@@ -318,7 +518,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $roll_no,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter roll number"
@@ -330,6 +530,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 
             <!-- Student Name -->
+
             <div class="mb-3">
 
                 <label
@@ -348,7 +549,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $name,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter student name"
@@ -360,6 +561,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 
             <!-- Email -->
+
             <div class="mb-3">
 
                 <label
@@ -378,7 +580,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $email,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter email address"
@@ -389,6 +591,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 
             <!-- Phone -->
+
             <div class="mb-3">
 
                 <label
@@ -407,11 +610,12 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $phone,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter 10-digit phone number"
                     maxlength="10"
+                    inputmode="numeric"
                     pattern="[0-9]{10}"
                 >
 
@@ -423,6 +627,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 
             <!-- Gender -->
+
             <div class="mb-3">
 
                 <label
@@ -445,9 +650,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                     <option
                         value="Male"
                         <?php
-                        if ($gender === "Male") {
-                            echo "selected";
-                        }
+                        echo $gender === 'Male'
+                            ? 'selected'
+                            : '';
                         ?>
                     >
                         Male
@@ -456,9 +661,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                     <option
                         value="Female"
                         <?php
-                        if ($gender === "Female") {
-                            echo "selected";
-                        }
+                        echo $gender === 'Female'
+                            ? 'selected'
+                            : '';
                         ?>
                     >
                         Female
@@ -470,7 +675,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
 
 
             <!-- Class -->
-            <div class="mb-3">
+
+            <div class="mb-4">
 
                 <label
                     for="class_name"
@@ -488,7 +694,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
                         echo htmlspecialchars(
                             $class_name,
                             ENT_QUOTES,
-                            "UTF-8"
+                            'UTF-8'
                         );
                     ?>"
                     placeholder="Enter class"
@@ -499,39 +705,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["save"])) {
             </div>
 
 
-            <!-- Password -->
-            <div class="mb-4">
-
-                <label
-                    for="password"
-                    class="form-label"
-                >
-                    Password
-                </label>
-
-                <input
-                    type="password"
-                    id="password"
-                    name="password"
-                    class="form-control"
-                    placeholder="Enter password"
-                    minlength="6"
-                    required
-                >
-
-                <div class="form-text">
-                    Password must contain at least 6 characters.
-                </div>
-
-            </div>
-
-
             <!-- Buttons -->
+
             <div class="button-group">
 
                 <button
                     type="submit"
                     name="save"
+                    value="1"
                     class="btn btn-success px-4"
                 >
                     Save Student

@@ -1,72 +1,157 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+require_once __DIR__ . '/config.php';
 
-$admin_name = $_SESSION['admin'] ?? 'Administrator';
-$admin_name = htmlspecialchars($admin_name, ENT_QUOTES, 'UTF-8');
-
-$search = '';
-
-if (isset($_GET['search'])) {
-    $search = trim($_GET['search']);
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-if ($search !== '') {
+$csrf_token = $_SESSION['csrf_token'];
 
-    $search_pattern = '%' . $search . '%';
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
+$admin_name = (string) ($_SESSION['admin'] ?? 'Administrator');
 
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, subject_name, subject_code, teacher_name
-         FROM subjects
-         WHERE subject_name LIKE ?
-            OR subject_code LIKE ?
-            OR teacher_name LIKE ?
-         ORDER BY id DESC"
-    );
+/*
+|--------------------------------------------------------------------------
+| Flash Messages
+|--------------------------------------------------------------------------
+*/
+$success = '';
 
-    if (!$stmt) {
-        die("Unable to load subjects.");
+if (isset($_SESSION['subject_add_success'])) {
+    $success = (string) $_SESSION['subject_add_success'];
+    unset($_SESSION['subject_add_success']);
+}
+
+if (isset($_SESSION['subject_update_success'])) {
+    $success = (string) $_SESSION['subject_update_success'];
+    unset($_SESSION['subject_update_success']);
+}
+
+if (isset($_SESSION['subject_delete_success'])) {
+    $success = (string) $_SESSION['subject_delete_success'];
+    unset($_SESSION['subject_delete_success']);
+}
+
+$error = '';
+
+if (isset($_SESSION['subject_delete_error'])) {
+    $error = (string) $_SESSION['subject_delete_error'];
+    unset($_SESSION['subject_delete_error']);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Search
+|--------------------------------------------------------------------------
+*/
+$search = trim((string) ($_GET['search'] ?? ''));
+
+if (strlen($search) > 100) {
+    $search = substr($search, 0, 100);
+}
+
+$subjects = [];
+$database_error = false;
+
+/*
+|--------------------------------------------------------------------------
+| Load Subjects
+|--------------------------------------------------------------------------
+*/
+try {
+
+    if ($search !== '') {
+
+        $search_pattern = '%' . $search . '%';
+
+        $stmt = $conn->prepare(
+            'SELECT id, subject_name, subject_code, teacher_name
+             FROM subjects
+             WHERE subject_name LIKE ?
+                OR subject_code LIKE ?
+                OR teacher_name LIKE ?
+             ORDER BY id DESC'
+        );
+
+        $stmt->bind_param(
+            'sss',
+            $search_pattern,
+            $search_pattern,
+            $search_pattern
+        );
+
+    } else {
+
+        $stmt = $conn->prepare(
+            'SELECT id, subject_name, subject_code, teacher_name
+             FROM subjects
+             ORDER BY id DESC'
+        );
     }
 
-    mysqli_stmt_bind_param(
-        $stmt,
-        "sss",
-        $search_pattern,
-        $search_pattern,
-        $search_pattern
+    $stmt->execute();
+
+    $stmt->bind_result(
+        $id,
+        $subject_name,
+        $subject_code,
+        $teacher_name
     );
 
-    mysqli_stmt_execute($stmt);
+    while ($stmt->fetch()) {
 
-    $result = mysqli_stmt_get_result($stmt);
-
-} else {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, subject_name, subject_code, teacher_name
-         FROM subjects
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load subjects.");
+        $subjects[] = [
+            'id' => (int) $id,
+            'subject_name' => (string) $subject_name,
+            'subject_code' => (string) $subject_code,
+            'teacher_name' => (string) $teacher_name
+        ];
     }
 
-    mysqli_stmt_execute($stmt);
+    $stmt->close();
 
-    $result = mysqli_stmt_get_result($stmt);
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Subjects list error: ' .
+        $e->getMessage()
+    );
+
+    $database_error = true;
 }
 
-$total_subjects = mysqli_num_rows($result);
+$total_subjects = count($subjects);
 
 ?>
 
@@ -77,7 +162,15 @@ $total_subjects = mysqli_num_rows($result);
 
     <meta charset="UTF-8">
 
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
 
     <title>Subjects | Class Management System</title>
 
@@ -103,8 +196,6 @@ $total_subjects = mysqli_num_rows($result);
             font-family: Arial, Helvetica, sans-serif;
             color: #212529;
         }
-
-        /* SIDEBAR */
 
         .sidebar {
             position: fixed;
@@ -197,14 +288,10 @@ $total_subjects = mysqli_num_rows($result);
             color: white;
         }
 
-        /* MAIN */
-
         .main-content {
             margin-left: 250px;
             min-height: 100vh;
         }
-
-        /* TOPBAR */
 
         .topbar {
             height: 70px;
@@ -241,8 +328,6 @@ $total_subjects = mysqli_num_rows($result);
             font-size: 18px;
         }
 
-        /* CONTENT */
-
         .content-area {
             padding: 30px;
         }
@@ -271,8 +356,6 @@ $total_subjects = mysqli_num_rows($result);
             display: flex;
             gap: 10px;
         }
-
-        /* SEARCH */
 
         .search-card {
             background: white;
@@ -305,8 +388,6 @@ $total_subjects = mysqli_num_rows($result);
             font-size: 14px;
         }
 
-        /* STAT */
-
         .subject-stat {
             background: linear-gradient(135deg, #2563eb, #1d4ed8);
             color: white;
@@ -326,8 +407,6 @@ $total_subjects = mysqli_num_rows($result);
             font-weight: 700;
             margin-top: 3px;
         }
-
-        /* TABLE */
 
         .table-card {
             background: white;
@@ -417,6 +496,11 @@ $total_subjects = mysqli_num_rows($result);
             margin-right: 5px;
         }
 
+        .delete-form {
+            display: inline-block;
+            margin: 0;
+        }
+
         .empty-state {
             text-align: center;
             padding: 60px 20px !important;
@@ -434,16 +518,12 @@ $total_subjects = mysqli_num_rows($result);
             margin-bottom: 6px;
         }
 
-        /* FOOTER */
-
         .footer {
             text-align: center;
             color: #9ca3af;
             font-size: 13px;
             padding: 25px 20px;
         }
-
-        /* MOBILE */
 
         @media (max-width: 992px) {
 
@@ -526,9 +606,6 @@ $total_subjects = mysqli_num_rows($result);
 
 <body>
 
-
-<!-- SIDEBAR -->
-
 <aside class="sidebar">
 
     <div class="sidebar-brand">
@@ -544,58 +621,48 @@ $total_subjects = mysqli_num_rows($result);
 
     </div>
 
-
     <div class="nav-title">
         Main Menu
     </div>
-
 
     <a href="dashboard.php">
         <i class="bi bi-grid-1x2-fill"></i>
         Dashboard
     </a>
 
-
     <a href="students.php">
         <i class="bi bi-people-fill"></i>
         Students
     </a>
-
 
     <a href="teachers.php">
         <i class="bi bi-person-workspace"></i>
         Teachers
     </a>
 
-
     <a href="subjects.php" class="active">
         <i class="bi bi-book-fill"></i>
         Subjects
     </a>
-
 
     <a href="attendance.php">
         <i class="bi bi-calendar-check-fill"></i>
         Attendance
     </a>
 
-
     <a href="marks.php">
         <i class="bi bi-bar-chart-fill"></i>
         Marks
     </a>
-
 
     <a href="reports.php">
         <i class="bi bi-file-earmark-bar-graph-fill"></i>
         Reports
     </a>
 
-
     <div class="nav-title">
         Account
     </div>
-
 
     <a href="logout.php" class="logout-link">
         <i class="bi bi-box-arrow-right"></i>
@@ -604,20 +671,13 @@ $total_subjects = mysqli_num_rows($result);
 
 </aside>
 
-
-<!-- MAIN CONTENT -->
-
 <main class="main-content">
-
-
-    <!-- TOPBAR -->
 
     <div class="topbar">
 
         <div class="topbar-title">
             Subject Management
         </div>
-
 
         <div class="admin-profile">
 
@@ -626,20 +686,20 @@ $total_subjects = mysqli_num_rows($result);
             </div>
 
             <span>
-                <?php echo $admin_name; ?>
+                <?php
+                echo htmlspecialchars(
+                    $admin_name,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
             </span>
 
         </div>
 
     </div>
 
-
-    <!-- CONTENT -->
-
     <div class="content-area">
-
-
-        <!-- PAGE HEADER -->
 
         <div class="page-header">
 
@@ -655,7 +715,6 @@ $total_subjects = mysqli_num_rows($result);
 
             </div>
 
-
             <div class="header-actions">
 
                 <a
@@ -665,7 +724,6 @@ $total_subjects = mysqli_num_rows($result);
                     <i class="bi bi-arrow-left"></i>
                     Dashboard
                 </a>
-
 
                 <a
                     href="add_subject.php"
@@ -679,8 +737,71 @@ $total_subjects = mysqli_num_rows($result);
 
         </div>
 
+        <?php if ($success !== ''): ?>
 
-        <!-- STAT -->
+            <div
+                class="alert alert-success alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-check-circle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $success,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($error !== ''): ?>
+
+            <div
+                class="alert alert-danger alert-dismissible fade show"
+                role="alert"
+            >
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php endif; ?>
+
+        <?php if ($database_error): ?>
+
+            <div
+                class="alert alert-danger"
+                role="alert"
+            >
+                <i class="bi bi-database-x me-2"></i>
+                Unable to load subjects right now. Please try again later.
+            </div>
+
+        <?php endif; ?>
 
         <div class="subject-stat">
 
@@ -694,23 +815,27 @@ $total_subjects = mysqli_num_rows($result);
 
         </div>
 
-
-        <!-- SEARCH -->
-
         <div class="search-card">
 
-            <form method="GET" action="subjects.php">
+            <form
+                method="GET"
+                action="subjects.php"
+            >
 
                 <div class="row g-3 align-items-end">
 
                     <div class="col-lg-10">
 
-                        <label class="search-label">
+                        <label
+                            for="search"
+                            class="search-label"
+                        >
                             Search Subjects
                         </label>
 
                         <input
-                            type="text"
+                            type="search"
+                            id="search"
                             name="search"
                             class="form-control search-input"
                             placeholder="Search by subject name, code or teacher..."
@@ -721,10 +846,11 @@ $total_subjects = mysqli_num_rows($result);
                                     'UTF-8'
                                 );
                             ?>"
+                            maxlength="100"
+                            autocomplete="off"
                         >
 
                     </div>
-
 
                     <div class="col-lg-2">
 
@@ -742,8 +868,7 @@ $total_subjects = mysqli_num_rows($result);
 
             </form>
 
-
-            <?php if ($search !== '') { ?>
+            <?php if ($search !== ''): ?>
 
                 <div class="search-info">
 
@@ -766,7 +891,6 @@ $total_subjects = mysqli_num_rows($result);
                         found
                     </span>
 
-
                     <a
                         href="subjects.php"
                         class="btn btn-sm btn-outline-secondary ms-2"
@@ -777,40 +901,30 @@ $total_subjects = mysqli_num_rows($result);
 
                 </div>
 
-            <?php } ?>
+            <?php endif; ?>
 
         </div>
 
-
-        <!-- SUBJECT TABLE -->
-
         <div class="table-card">
-
 
             <div class="table-header">
 
-                <div>
-
-                    <h5>
-                        <i class="bi bi-book me-2"></i>
-                        Subject Records
-                    </h5>
-
-                </div>
-
+                <h5>
+                    <i class="bi bi-book me-2"></i>
+                    Subject Records
+                </h5>
 
                 <span class="badge bg-light text-dark border">
 
                     <?php echo $total_subjects; ?>
 
-                    <?php echo ($total_subjects == 1)
+                    <?php echo ($total_subjects === 1)
                         ? 'Subject'
                         : 'Subjects'; ?>
 
                 </span>
 
             </div>
-
 
             <div class="table-wrapper">
 
@@ -821,40 +935,32 @@ $total_subjects = mysqli_num_rows($result);
                         <tr>
 
                             <th>ID</th>
-
                             <th>Subject</th>
-
                             <th>Subject Code</th>
-
                             <th>Teacher</th>
-
                             <th>Actions</th>
 
                         </tr>
 
                     </thead>
 
-
                     <tbody>
 
+                    <?php if (!$database_error && $total_subjects > 0): ?>
 
-                    <?php if ($total_subjects > 0) { ?>
-
-
-                        <?php while ($row = mysqli_fetch_assoc($result)) { ?>
-
+                        <?php foreach ($subjects as $row): ?>
 
                             <tr>
-
 
                                 <td>
 
                                     <strong>
-                                        #<?php echo (int)$row['id']; ?>
+                                        #<?php
+                                        echo (int) $row['id'];
+                                        ?>
                                     </strong>
 
                                 </td>
-
 
                                 <td>
 
@@ -866,27 +972,21 @@ $total_subjects = mysqli_num_rows($result);
 
                                         </div>
 
+                                        <div class="subject-name">
 
-                                        <div>
-
-                                            <div class="subject-name">
-
-                                                <?php
-                                                echo htmlspecialchars(
-                                                    $row['subject_name'],
-                                                    ENT_QUOTES,
-                                                    'UTF-8'
-                                                );
-                                                ?>
-
-                                            </div>
+                                            <?php
+                                            echo htmlspecialchars(
+                                                $row['subject_name'],
+                                                ENT_QUOTES,
+                                                'UTF-8'
+                                            );
+                                            ?>
 
                                         </div>
 
                                     </div>
 
                                 </td>
-
 
                                 <td>
 
@@ -903,7 +1003,6 @@ $total_subjects = mysqli_num_rows($result);
                                     </span>
 
                                 </td>
-
 
                                 <td>
 
@@ -923,39 +1022,60 @@ $total_subjects = mysqli_num_rows($result);
 
                                 </td>
 
-
                                 <td class="action-buttons">
 
-
                                     <a
-                                        href="edit_subject.php?id=<?php echo (int)$row['id']; ?>"
+                                        href="edit_subject.php?id=<?php echo (int) $row['id']; ?>"
                                         class="btn btn-sm btn-outline-warning"
                                     >
                                         <i class="bi bi-pencil-square"></i>
                                         Edit
                                     </a>
 
-
-                                    <a
-                                        href="delete_subject.php?id=<?php echo (int)$row['id']; ?>"
-                                        class="btn btn-sm btn-outline-danger"
-                                        onclick="return confirm('Are you sure you want to delete this subject?');"
+                                    <form
+                                        method="POST"
+                                        action="delete_subject.php"
+                                        class="delete-form"
+                                        onsubmit="return confirm('Are you sure you want to delete this subject?');"
                                     >
-                                        <i class="bi bi-trash3"></i>
-                                        Delete
-                                    </a>
 
+                                        <input
+                                            type="hidden"
+                                            name="id"
+                                            value="<?php
+                                                echo (int) $row['id'];
+                                            ?>"
+                                        >
+
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php
+                                                echo htmlspecialchars(
+                                                    $csrf_token,
+                                                    ENT_QUOTES,
+                                                    'UTF-8'
+                                                );
+                                            ?>"
+                                        >
+
+                                        <button
+                                            type="submit"
+                                            class="btn btn-sm btn-outline-danger"
+                                        >
+                                            <i class="bi bi-trash3"></i>
+                                            Delete
+                                        </button>
+
+                                    </form>
 
                                 </td>
 
                             </tr>
 
+                        <?php endforeach; ?>
 
-                        <?php } ?>
-
-
-                    <?php } else { ?>
-
+                    <?php elseif (!$database_error): ?>
 
                         <tr>
 
@@ -968,28 +1088,25 @@ $total_subjects = mysqli_num_rows($result);
                                     <i class="bi bi-book"></i>
                                 </div>
 
-
                                 <h5>
                                     No Subjects Found
                                 </h5>
 
-
                                 <p class="mb-3">
 
-                                    <?php if ($search !== '') { ?>
+                                    <?php if ($search !== ''): ?>
 
                                         No subjects matched your search.
 
-                                    <?php } else { ?>
+                                    <?php else: ?>
 
                                         No subjects have been added yet.
 
-                                    <?php } ?>
+                                    <?php endif; ?>
 
                                 </p>
 
-
-                                <?php if ($search === '') { ?>
+                                <?php if ($search === ''): ?>
 
                                     <a
                                         href="add_subject.php"
@@ -999,7 +1116,7 @@ $total_subjects = mysqli_num_rows($result);
                                         Add First Subject
                                     </a>
 
-                                <?php } else { ?>
+                                <?php else: ?>
 
                                     <a
                                         href="subjects.php"
@@ -1009,15 +1126,13 @@ $total_subjects = mysqli_num_rows($result);
                                         Clear Search
                                     </a>
 
-                                <?php } ?>
+                                <?php endif; ?>
 
                             </td>
 
                         </tr>
 
-
-                    <?php } ?>
-
+                    <?php endif; ?>
 
                     </tbody>
 
@@ -1027,31 +1142,21 @@ $total_subjects = mysqli_num_rows($result);
 
         </div>
 
-
     </div>
-
-
-    <!-- FOOTER -->
 
     <div class="footer">
 
-        © 2026 Class Management System
+        © <?php echo date('Y'); ?> Class Management System
         <br>
         Subject Management Panel
 
     </div>
 
-
 </main>
 
-
-<?php
-
-if (isset($stmt) && $stmt) {
-    mysqli_stmt_close($stmt);
-}
-
-?>
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js">
+</script>
 
 </body>
 

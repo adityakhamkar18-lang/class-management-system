@@ -1,25 +1,35 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+require_once __DIR__ . '/config.php';
 
-/* -------------------------------------------------------
-   Helper
-------------------------------------------------------- */
-function e($value)
+/*
+|--------------------------------------------------------------------------
+| Helper
+|--------------------------------------------------------------------------
+*/
+function e(mixed $value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars(
+        (string) $value,
+        ENT_QUOTES,
+        'UTF-8'
+    );
 }
 
-/* -------------------------------------------------------
-   Get Student ID
-------------------------------------------------------- */
+/*
+|--------------------------------------------------------------------------
+| Get Student ID
+|--------------------------------------------------------------------------
+*/
 $student_id = filter_input(
     INPUT_GET,
     'student_id',
@@ -30,95 +40,200 @@ if ($student_id === false || $student_id === null || $student_id <= 0) {
     $student_id = 0;
 }
 
-/* -------------------------------------------------------
-   Fetch Students
-------------------------------------------------------- */
-$students = mysqli_query(
-    $conn,
-    "SELECT id, roll_no, name, class_name
-     FROM students
-     ORDER BY name ASC"
-);
-
-if (!$students) {
-    die("Unable to load students.");
-}
-
-/* -------------------------------------------------------
-   Student Information
-------------------------------------------------------- */
+/*
+|--------------------------------------------------------------------------
+| Variables
+|--------------------------------------------------------------------------
+*/
+$students = [];
 $student = null;
-
-if ($student_id > 0) {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, roll_no, name, email, phone, gender, class_name
-         FROM students
-         WHERE id = ?"
-    );
-
-    if (!$stmt) {
-        die("Unable to load student information.");
-    }
-
-    mysqli_stmt_bind_param($stmt, "i", $student_id);
-    mysqli_stmt_execute($stmt);
-
-    $student_result = mysqli_stmt_get_result($stmt);
-    $student = mysqli_fetch_assoc($student_result);
-
-    mysqli_stmt_close($stmt);
-}
-
-/* -------------------------------------------------------
-   Marks
-------------------------------------------------------- */
 $marks_records = [];
 
-$total_marks = 0;
+$total_marks = 0.0;
 $total_subjects = 0;
-$percentage = 0;
+$percentage = 0.0;
 
-if ($student) {
+$result_status = '';
+$performance_label = 'No Data';
 
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, subject_name, marks
-         FROM marks
-         WHERE student_id = ?
-         ORDER BY subject_name ASC, id ASC"
+$database_error = '';
+
+/*
+|--------------------------------------------------------------------------
+| Fetch Students
+|--------------------------------------------------------------------------
+*/
+try {
+
+    $stmt = $conn->prepare(
+        'SELECT id, roll_no, name, class_name
+         FROM students
+         ORDER BY name ASC, id ASC'
     );
 
-    if (!$stmt) {
-        die("Unable to load marks.");
+    $stmt->execute();
+
+    $stmt->bind_result(
+        $list_id,
+        $list_roll_no,
+        $list_name,
+        $list_class_name
+    );
+
+    while ($stmt->fetch()) {
+
+        $students[] = [
+            'id' => $list_id,
+            'roll_no' => $list_roll_no,
+            'name' => $list_name,
+            'class_name' => $list_class_name
+        ];
     }
 
-    mysqli_stmt_bind_param($stmt, "i", $student_id);
-    mysqli_stmt_execute($stmt);
+    $stmt->close();
 
-    $marks_result = mysqli_stmt_get_result($stmt);
+} catch (mysqli_sql_exception $e) {
 
-    while ($mark = mysqli_fetch_assoc($marks_result)) {
+    error_log(
+        'Student report - student list error: ' .
+        $e->getMessage()
+    );
 
-        $marks_records[] = $mark;
+    $database_error = 'Unable to load the student list right now.';
+}
 
-        $total_marks += (float)$mark['marks'];
-        $total_subjects++;
-    }
+/*
+|--------------------------------------------------------------------------
+| Fetch Selected Student
+|--------------------------------------------------------------------------
+*/
+if ($student_id > 0 && $database_error === '') {
 
-    mysqli_stmt_close($stmt);
+    try {
 
-    if ($total_subjects > 0) {
-        $percentage = ($total_marks / ($total_subjects * 100)) * 100;
+        $stmt = $conn->prepare(
+            'SELECT id, roll_no, name, email, phone, gender, class_name
+             FROM students
+             WHERE id = ?
+             LIMIT 1'
+        );
+
+        $stmt->bind_param('i', $student_id);
+        $stmt->execute();
+
+        $stmt->store_result();
+
+        if ($stmt->num_rows === 1) {
+
+            $stmt->bind_result(
+                $student_db_id,
+                $student_roll_no,
+                $student_name,
+                $student_email,
+                $student_phone,
+                $student_gender,
+                $student_class_name
+            );
+
+            $stmt->fetch();
+
+            $student = [
+                'id' => $student_db_id,
+                'roll_no' => $student_roll_no,
+                'name' => $student_name,
+                'email' => $student_email,
+                'phone' => $student_phone,
+                'gender' => $student_gender,
+                'class_name' => $student_class_name
+            ];
+        }
+
+        $stmt->close();
+
+    } catch (mysqli_sql_exception $e) {
+
+        error_log(
+            'Student report - student information error: ' .
+            $e->getMessage()
+        );
+
+        $database_error = 'Unable to load student information right now.';
     }
 }
 
-/* -------------------------------------------------------
-   Result
-------------------------------------------------------- */
-$result_status = '';
+/*
+|--------------------------------------------------------------------------
+| Fetch Marks
+|--------------------------------------------------------------------------
+*/
+if ($student !== null && $database_error === '') {
 
+    try {
+
+        $stmt = $conn->prepare(
+            'SELECT id, subject_name, marks
+             FROM marks
+             WHERE student_id = ?
+             ORDER BY subject_name ASC, id ASC'
+        );
+
+        $stmt->bind_param('i', $student_id);
+        $stmt->execute();
+
+        $stmt->bind_result(
+            $mark_id,
+            $mark_subject_name,
+            $mark_value
+        );
+
+        while ($stmt->fetch()) {
+
+            $marks_records[] = [
+                'id' => $mark_id,
+                'subject_name' => $mark_subject_name,
+                'marks' => $mark_value
+            ];
+
+            $total_marks += (float) $mark_value;
+            $total_subjects++;
+        }
+
+        $stmt->close();
+
+    } catch (mysqli_sql_exception $e) {
+
+        error_log(
+            'Student report - marks error: ' .
+            $e->getMessage()
+        );
+
+        $database_error = 'Unable to load marks right now.';
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Calculate Percentage
+|--------------------------------------------------------------------------
+*/
+if ($total_subjects > 0) {
+
+    $percentage = (
+        $total_marks /
+        ($total_subjects * 100)
+    ) * 100;
+
+    $percentage = min(
+        100,
+        max(0, $percentage)
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Result
+|--------------------------------------------------------------------------
+*/
 if ($total_subjects > 0) {
 
     $result_status = ($percentage >= 40)
@@ -126,26 +241,39 @@ if ($total_subjects > 0) {
         : 'FAIL';
 }
 
-/* -------------------------------------------------------
-   Performance Label
-------------------------------------------------------- */
-$performance_label = 'No Data';
-
+/*
+|--------------------------------------------------------------------------
+| Performance Label
+|--------------------------------------------------------------------------
+*/
 if ($total_subjects > 0) {
 
     if ($percentage >= 75) {
+
         $performance_label = 'Excellent';
+
     } elseif ($percentage >= 60) {
+
         $performance_label = 'Good';
+
     } elseif ($percentage >= 40) {
+
         $performance_label = 'Satisfactory';
+
     } else {
+
         $performance_label = 'Needs Improvement';
     }
 }
 
-?>
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
+$admin_name = $_SESSION['admin'] ?? 'Administrator';
 
+?>
 <!DOCTYPE html>
 <html lang="en">
 
@@ -158,7 +286,12 @@ if ($total_subjects > 0) {
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Student Performance Report</title>
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <title>Student Performance Report | Class Management System</title>
 
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -183,10 +316,6 @@ if ($total_subjects > 0) {
             color: #1f2937;
         }
 
-        /* ------------------------------------------------
-           TOP BAR
-        ------------------------------------------------ */
-
         .top-bar {
             background: #111827;
             color: white;
@@ -194,6 +323,7 @@ if ($total_subjects > 0) {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 15px;
         }
 
         .brand {
@@ -206,10 +336,6 @@ if ($total_subjects > 0) {
             gap: 10px;
             align-items: center;
         }
-
-        /* ------------------------------------------------
-           PAGE
-        ------------------------------------------------ */
 
         .page-wrapper {
             max-width: 1250px;
@@ -237,10 +363,6 @@ if ($total_subjects > 0) {
             color: #6b7280;
         }
 
-        /* ------------------------------------------------
-           SELECT STUDENT
-        ------------------------------------------------ */
-
         .selection-card {
             background: white;
             border-radius: 16px;
@@ -262,10 +384,6 @@ if ($total_subjects > 0) {
             min-height: 46px;
             font-weight: 600;
         }
-
-        /* ------------------------------------------------
-           MAIN REPORT
-        ------------------------------------------------ */
 
         .report-sheet {
             background: white;
@@ -311,15 +429,12 @@ if ($total_subjects > 0) {
             align-items: center;
             justify-content: center;
             font-size: 38px;
+            flex-shrink: 0;
         }
 
         .report-content {
             padding: 30px;
         }
-
-        /* ------------------------------------------------
-           STUDENT PROFILE
-        ------------------------------------------------ */
 
         .student-profile {
             border: 1px solid #e5e7eb;
@@ -350,6 +465,7 @@ if ($total_subjects > 0) {
             display: flex;
             justify-content: center;
             align-items: center;
+            flex-shrink: 0;
         }
 
         .profile-label {
@@ -360,11 +476,8 @@ if ($total_subjects > 0) {
 
         .profile-value {
             font-weight: 700;
+            word-break: break-word;
         }
-
-        /* ------------------------------------------------
-           PERFORMANCE OVERVIEW
-        ------------------------------------------------ */
 
         .performance-overview {
             margin-bottom: 28px;
@@ -402,10 +515,6 @@ if ($total_subjects > 0) {
             font-weight: 800;
             margin-top: 8px;
         }
-
-        /* ------------------------------------------------
-           PERFORMANCE METER
-        ------------------------------------------------ */
 
         .meter-card {
             background: #f8fafc;
@@ -445,10 +554,6 @@ if ($total_subjects > 0) {
             background: #dc2626;
         }
 
-        /* ------------------------------------------------
-           RESULT BADGE
-        ------------------------------------------------ */
-
         .result-section {
             display: flex;
             justify-content: space-between;
@@ -478,10 +583,6 @@ if ($total_subjects > 0) {
             color: #dc2626;
         }
 
-        /* ------------------------------------------------
-           MARKS TABLE
-        ------------------------------------------------ */
-
         .marks-section {
             margin-top: 10px;
         }
@@ -491,6 +592,7 @@ if ($total_subjects > 0) {
             justify-content: space-between;
             align-items: center;
             margin-bottom: 15px;
+            gap: 10px;
         }
 
         .marks-heading h4 {
@@ -538,6 +640,7 @@ if ($total_subjects > 0) {
             border-radius: 20px;
             font-size: 12px;
             font-weight: 700;
+            display: inline-block;
         }
 
         .badge-good {
@@ -550,10 +653,6 @@ if ($total_subjects > 0) {
             color: #991b1b;
         }
 
-        /* ------------------------------------------------
-           FOOTER
-        ------------------------------------------------ */
-
         .report-footer {
             text-align: center;
             margin-top: 30px;
@@ -563,18 +662,32 @@ if ($total_subjects > 0) {
             font-size: 13px;
         }
 
-        /* ------------------------------------------------
-           RESPONSIVE
-        ------------------------------------------------ */
-
         @media (max-width: 768px) {
 
             .top-bar {
                 padding: 13px 16px;
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .top-actions {
+                width: 100%;
+            }
+
+            .top-actions .btn {
+                flex: 1;
             }
 
             .page-wrapper {
                 margin-top: 18px;
+            }
+
+            .page-header {
+                padding: 20px;
+            }
+
+            .page-header h1 {
+                font-size: 23px;
             }
 
             .academic-header {
@@ -584,6 +697,10 @@ if ($total_subjects > 0) {
             .academic-header-inner {
                 flex-direction: column;
                 align-items: flex-start;
+            }
+
+            .academic-title {
+                font-size: 23px;
             }
 
             .report-content {
@@ -596,11 +713,11 @@ if ($total_subjects > 0) {
                 gap: 8px;
             }
 
+            .marks-heading {
+                align-items: flex-start;
+                flex-direction: column;
+            }
         }
-
-        /* ------------------------------------------------
-           PRINT
-        ------------------------------------------------ */
 
         @media print {
 
@@ -635,7 +752,6 @@ if ($total_subjects > 0) {
             .table-container {
                 border: 1px solid #ccc;
             }
-
         }
 
     </style>
@@ -643,10 +759,6 @@ if ($total_subjects > 0) {
 </head>
 
 <body>
-
-<!-- =====================================================
-     TOP BAR
-====================================================== -->
 
 <div class="top-bar no-print">
 
@@ -677,13 +789,7 @@ if ($total_subjects > 0) {
 
 </div>
 
-
 <div class="page-wrapper">
-
-
-    <!-- =================================================
-         PAGE HEADER
-    ================================================== -->
 
     <div class="page-header no-print">
 
@@ -698,10 +804,17 @@ if ($total_subjects > 0) {
 
     </div>
 
+    <?php if ($database_error !== '') { ?>
 
-    <!-- =================================================
-         STUDENT SELECTION
-    ================================================== -->
+        <div class="alert alert-danger no-print">
+
+            <i class="bi bi-exclamation-triangle-fill"></i>
+
+            <?php echo e($database_error); ?>
+
+        </div>
+
+    <?php } ?>
 
     <div class="selection-card no-print">
 
@@ -712,7 +825,7 @@ if ($total_subjects > 0) {
 
         </div>
 
-        <form method="GET">
+        <form method="GET" action="student_report.php">
 
             <div class="row g-3">
 
@@ -728,12 +841,14 @@ if ($total_subjects > 0) {
                             -- Select Student --
                         </option>
 
-                        <?php while ($s = mysqli_fetch_assoc($students)) { ?>
+                        <?php foreach ($students as $s) { ?>
 
                             <option
-                                value="<?php echo (int)$s['id']; ?>"
+                                value="<?php echo (int) $s['id']; ?>"
                                 <?php
-                                echo ($student_id === (int)$s['id'])
+                                echo (
+                                    $student_id === (int) $s['id']
+                                )
                                     ? 'selected'
                                     : '';
                                 ?>
@@ -776,542 +891,540 @@ if ($total_subjects > 0) {
 
     </div>
 
+    <?php if ($student !== null) { ?>
 
-    <?php if ($student) { ?>
+        <div class="report-sheet">
 
+            <div class="academic-header">
 
-    <!-- =================================================
-         REPORT SHEET
-    ================================================== -->
+                <div class="academic-header-inner">
 
-    <div class="report-sheet">
+                    <div>
 
-
-        <!-- Academic Header -->
-
-        <div class="academic-header">
-
-            <div class="academic-header-inner">
-
-                <div>
-
-                    <div class="academic-title">
-                        Student Performance Report
-                    </div>
-
-                    <div class="academic-subtitle">
-                        Academic Performance Summary
-                    </div>
-
-                </div>
-
-                <div class="academic-icon">
-
-                    <i class="bi bi-mortarboard-fill"></i>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <div class="report-content">
-
-
-            <!-- =================================================
-                 STUDENT PROFILE
-            ================================================== -->
-
-            <div class="student-profile">
-
-                <div class="section-title">
-
-                    <i class="bi bi-person-vcard-fill text-primary"></i>
-                    Student Profile
-
-                </div>
-
-                <div class="row">
-
-                    <div class="col-md-6">
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-person-fill"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Student Name
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['name']); ?>
-                                </div>
-
-                            </div>
-
+                        <div class="academic-title">
+                            Student Performance Report
                         </div>
 
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-hash"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Roll Number
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['roll_no']); ?>
-                                </div>
-
-                            </div>
-
-                        </div>
-
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-building"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Class
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['class_name']); ?>
-                                </div>
-
-                            </div>
-
+                        <div class="academic-subtitle">
+                            Academic Performance Summary
                         </div>
 
                     </div>
 
-
-                    <div class="col-md-6">
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-envelope-fill"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Email
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['email']); ?>
-                                </div>
-
-                            </div>
-
-                        </div>
-
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-telephone-fill"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Phone
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['phone']); ?>
-                                </div>
-
-                            </div>
-
-                        </div>
-
-
-                        <div class="profile-item">
-
-                            <div class="profile-icon">
-                                <i class="bi bi-gender-ambiguous"></i>
-                            </div>
-
-                            <div>
-
-                                <div class="profile-label">
-                                    Gender
-                                </div>
-
-                                <div class="profile-value">
-                                    <?php echo e($student['gender']); ?>
-                                </div>
-
-                            </div>
-
-                        </div>
-
+                    <div class="academic-icon">
+                        <i class="bi bi-mortarboard-fill"></i>
                     </div>
 
                 </div>
 
             </div>
 
+            <div class="report-content">
 
-            <!-- =================================================
-                 PERFORMANCE OVERVIEW
-            ================================================== -->
+                <div class="student-profile">
 
-            <div class="performance-overview">
+                    <div class="section-title">
 
-                <div class="section-title">
+                        <i class="bi bi-person-vcard-fill text-primary"></i>
+                        Student Profile
 
-                    <i class="bi bi-graph-up-arrow text-primary"></i>
-                    Performance Overview
+                    </div>
+
+                    <div class="row">
+
+                        <div class="col-md-6">
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-person-fill"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Student Name
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php echo e($student['name']); ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-hash"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Roll Number
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php echo e($student['roll_no']); ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-building"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Class
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php echo e($student['class_name']); ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                        <div class="col-md-6">
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-envelope-fill"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Email
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php
+                                        echo e(
+                                            $student['email'] !== ''
+                                                ? $student['email']
+                                                : 'Not provided'
+                                        );
+                                        ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-telephone-fill"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Phone
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php
+                                        echo e(
+                                            $student['phone'] !== ''
+                                                ? $student['phone']
+                                                : 'Not provided'
+                                        );
+                                        ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                            <div class="profile-item">
+
+                                <div class="profile-icon">
+                                    <i class="bi bi-gender-ambiguous"></i>
+                                </div>
+
+                                <div>
+
+                                    <div class="profile-label">
+                                        Gender
+                                    </div>
+
+                                    <div class="profile-value">
+                                        <?php
+                                        echo e(
+                                            $student['gender'] !== ''
+                                                ? $student['gender']
+                                                : 'Not provided'
+                                        );
+                                        ?>
+                                    </div>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
 
                 </div>
 
-                <div class="row g-3">
+                <div class="performance-overview">
 
+                    <div class="section-title">
 
-                    <!-- Subjects -->
+                        <i class="bi bi-graph-up-arrow text-primary"></i>
+                        Performance Overview
 
-                    <div class="col-md-4">
+                    </div>
 
-                        <div class="performance-card blue">
+                    <div class="row g-3">
 
-                            <h6>
-                                <i class="bi bi-book-fill"></i>
-                                Subjects
-                            </h6>
+                        <div class="col-md-4">
 
-                            <div class="performance-number">
-                                <?php echo $total_subjects; ?>
+                            <div class="performance-card blue">
+
+                                <h6>
+                                    <i class="bi bi-book-fill"></i>
+                                    Subjects
+                                </h6>
+
+                                <div class="performance-number">
+                                    <?php echo $total_subjects; ?>
+                                </div>
+
+                                <small class="text-muted">
+                                    Subjects with marks
+                                </small>
+
                             </div>
 
-                            <small class="text-muted">
-                                Subjects with marks
-                            </small>
+                        </div>
+
+                        <div class="col-md-4">
+
+                            <div class="performance-card orange">
+
+                                <h6>
+                                    <i class="bi bi-calculator-fill"></i>
+                                    Total Marks
+                                </h6>
+
+                                <div class="performance-number">
+
+                                    <?php
+                                    echo number_format(
+                                        $total_marks,
+                                        2
+                                    );
+                                    ?>
+
+                                </div>
+
+                                <small class="text-muted">
+                                    Out of
+                                    <?php
+                                    echo $total_subjects * 100;
+                                    ?>
+                                </small>
+
+                            </div>
+
+                        </div>
+
+                        <div class="col-md-4">
+
+                            <div class="performance-card green">
+
+                                <h6>
+                                    <i class="bi bi-percent"></i>
+                                    Percentage
+                                </h6>
+
+                                <div class="performance-number">
+
+                                    <?php
+                                    echo number_format(
+                                        $percentage,
+                                        2
+                                    );
+                                    ?>%
+
+                                </div>
+
+                                <small class="text-muted">
+                                    Overall academic score
+                                </small>
+
+                            </div>
 
                         </div>
 
                     </div>
 
+                </div>
 
-                    <!-- Total Marks -->
+                <?php if ($total_subjects > 0) { ?>
 
-                    <div class="col-md-4">
+                    <div class="meter-card">
 
-                        <div class="performance-card orange">
+                        <div class="meter-top">
 
-                            <h6>
-                                <i class="bi bi-calculator-fill"></i>
-                                Total Marks
-                            </h6>
+                            <span>
+                                Overall Performance
+                            </span>
 
-                            <div class="performance-number">
-
-                                <?php
-                                echo number_format(
-                                    $total_marks,
-                                    2
-                                );
-                                ?>
-
-                            </div>
-
-                            <small class="text-muted">
-                                Out of <?php echo $total_subjects * 100; ?>
-                            </small>
-
-                        </div>
-
-                    </div>
-
-
-                    <!-- Percentage -->
-
-                    <div class="col-md-4">
-
-                        <div class="performance-card green">
-
-                            <h6>
-                                <i class="bi bi-percent"></i>
-                                Percentage
-                            </h6>
-
-                            <div class="performance-number">
-
+                            <span>
                                 <?php
                                 echo number_format(
                                     $percentage,
                                     2
                                 );
                                 ?>%
+                            </span>
 
-                            </div>
+                        </div>
 
-                            <small class="text-muted">
-                                Overall academic score
-                            </small>
+                        <div class="performance-progress">
+
+                            <div
+                                class="performance-progress-bar
+                                <?php
+                                if ($percentage >= 60) {
+                                    echo 'progress-good';
+                                } elseif ($percentage >= 40) {
+                                    echo 'progress-average';
+                                } else {
+                                    echo 'progress-low';
+                                }
+                                ?>"
+                                style="width: <?php echo e((string) $percentage); ?>%;"
+                            ></div>
+
+                        </div>
+
+                        <div class="mt-2 text-muted small">
+
+                            Performance Level:
+
+                            <strong>
+                                <?php echo e($performance_label); ?>
+                            </strong>
 
                         </div>
 
                     </div>
 
-                </div>
+                    <div class="result-section">
 
-            </div>
+                        <div>
 
+                            <div class="result-title">
+                                Final Result
+                            </div>
 
-            <?php if ($total_subjects > 0) { ?>
-
-
-            <!-- =================================================
-                 PERFORMANCE METER
-            ================================================== -->
-
-            <div class="meter-card">
-
-                <div class="meter-top">
-
-                    <span>
-                        Overall Performance
-                    </span>
-
-                    <span>
-                        <?php
-                        echo number_format(
-                            $percentage,
-                            2
-                        );
-                        ?>%
-                    </span>
-
-                </div>
-
-                <div class="performance-progress">
-
-                    <div
-                        class="performance-progress-bar
-                        <?php
-                        if ($percentage >= 60) {
-                            echo 'progress-good';
-                        } elseif ($percentage >= 40) {
-                            echo 'progress-average';
-                        } else {
-                            echo 'progress-low';
-                        }
-                        ?>"
-                        style="width: <?php echo min(100, max(0, $percentage)); ?>%;"
-                    ></div>
-
-                </div>
-
-                <div class="mt-2 text-muted small">
-
-                    Performance Level:
-                    <strong>
-                        <?php echo e($performance_label); ?>
-                    </strong>
-
-                </div>
-
-            </div>
-
-
-            <!-- =================================================
-                 RESULT
-            ================================================== -->
-
-            <div class="result-section">
-
-                <div>
-
-                    <div class="result-title">
-                        Final Result
-                    </div>
-
-                    <div
-                        class="result-value
-                        <?php
-                        echo ($result_status === 'PASS')
-                            ? 'result-pass'
-                            : 'result-fail';
-                        ?>"
-                    >
-
-                        <?php echo e($result_status); ?>
-
-                    </div>
-
-                </div>
-
-                <div class="text-muted">
-
-                    Passing percentage: <strong>40%</strong>
-
-                </div>
-
-            </div>
-
-
-            <?php } ?>
-
-
-            <!-- =================================================
-                 MARKS TABLE
-            ================================================== -->
-
-            <div class="marks-section">
-
-                <div class="marks-heading">
-
-                    <h4>
-
-                        <i class="bi bi-journal-text text-primary"></i>
-                        Subject-wise Performance
-
-                    </h4>
-
-                    <span class="badge bg-primary">
-
-                        <?php echo $total_subjects; ?>
-                        Subjects
-
-                    </span>
-
-                </div>
-
-
-                <div class="table-container">
-
-                    <div class="table-responsive">
-
-                        <table class="table marks-table">
-
-                            <thead>
-
-                                <tr>
-
-                                    <th width="80">
-                                        #
-                                    </th>
-
-                                    <th>
-                                        Subject
-                                    </th>
-
-                                    <th width="180">
-                                        Marks
-                                    </th>
-
-                                    <th width="180">
-                                        Performance
-                                    </th>
-
-                                </tr>
-
-                            </thead>
-
-                            <tbody>
-
-                            <?php if (count($marks_records) > 0) { ?>
-
+                            <div
+                                class="result-value
                                 <?php
-                                $sr_no = 1;
-                                ?>
+                                echo (
+                                    $result_status === 'PASS'
+                                )
+                                    ? 'result-pass'
+                                    : 'result-fail';
+                                ?>"
+                            >
 
-                                <?php foreach ($marks_records as $mark) { ?>
+                                <?php echo e($result_status); ?>
 
-                                    <?php
-                                    $mark_value = (float)$mark['marks'];
+                            </div>
 
-                                    $is_pass = $mark_value >= 40;
-                                    ?>
+                        </div>
+
+                        <div class="text-muted">
+
+                            Passing percentage:
+                            <strong>40%</strong>
+
+                        </div>
+
+                    </div>
+
+                <?php } else { ?>
+
+                    <div class="alert alert-info mb-4">
+
+                        <i class="bi bi-info-circle-fill"></i>
+
+                        No marks have been recorded for this student yet.
+
+                    </div>
+
+                <?php } ?>
+
+                <div class="marks-section">
+
+                    <div class="marks-heading">
+
+                        <h4>
+
+                            <i class="bi bi-journal-text text-primary"></i>
+                            Subject-wise Performance
+
+                        </h4>
+
+                        <span class="badge bg-primary">
+
+                            <?php echo $total_subjects; ?>
+                            Subjects
+
+                        </span>
+
+                    </div>
+
+                    <div class="table-container">
+
+                        <div class="table-responsive">
+
+                            <table class="table marks-table">
+
+                                <thead>
 
                                     <tr>
 
-                                        <td>
+                                        <th width="80">
+                                            #
+                                        </th>
 
-                                            <?php
-                                            echo $sr_no++;
-                                            ?>
+                                        <th>
+                                            Subject
+                                        </th>
 
-                                        </td>
+                                        <th width="180">
+                                            Marks
+                                        </th>
 
-                                        <td>
+                                        <th width="180">
+                                            Performance
+                                        </th>
 
-                                            <strong>
+                                    </tr>
 
-                                                <?php
-                                                echo e(
-                                                    $mark['subject_name']
-                                                );
-                                                ?>
+                                </thead>
 
-                                            </strong>
+                                <tbody>
 
-                                        </td>
+                                <?php if (count($marks_records) > 0) { ?>
 
-                                        <td>
+                                    <?php $sr_no = 1; ?>
 
-                                            <span
-                                                class="marks-value
-                                                <?php
-                                                echo $is_pass
-                                                    ? 'marks-good'
-                                                    : 'marks-low';
-                                                ?>"
-                                            >
+                                    <?php foreach ($marks_records as $mark) { ?>
 
-                                                <?php
-                                                echo e($mark['marks']);
-                                                ?>
+                                        <?php
+                                        $mark_value = (float) $mark['marks'];
+                                        $is_pass = $mark_value >= 40;
+                                        ?>
 
-                                            </span>
+                                        <tr>
 
-                                            <span class="text-muted">
-                                                / 100
-                                            </span>
+                                            <td>
+                                                <?php echo $sr_no++; ?>
+                                            </td>
 
-                                        </td>
+                                            <td>
 
-                                        <td>
+                                                <strong>
+                                                    <?php
+                                                    echo e(
+                                                        $mark['subject_name']
+                                                    );
+                                                    ?>
+                                                </strong>
 
-                                            <?php if ($is_pass) { ?>
+                                            </td>
 
-                                                <span
-                                                    class="performance-badge badge-good"
-                                                >
-                                                    <i class="bi bi-check-circle-fill"></i>
-                                                    Pass
-                                                </span>
-
-                                            <?php } else { ?>
+                                            <td>
 
                                                 <span
-                                                    class="performance-badge badge-low"
+                                                    class="marks-value
+                                                    <?php
+                                                    echo $is_pass
+                                                        ? 'marks-good'
+                                                        : 'marks-low';
+                                                    ?>"
                                                 >
-                                                    <i class="bi bi-exclamation-circle-fill"></i>
-                                                    Needs Improvement
+
+                                                    <?php
+                                                    echo e(
+                                                        $mark['marks']
+                                                    );
+                                                    ?>
+
                                                 </span>
 
-                                            <?php } ?>
+                                                <span class="text-muted">
+                                                    / 100
+                                                </span>
+
+                                            </td>
+
+                                            <td>
+
+                                                <?php if ($is_pass) { ?>
+
+                                                    <span
+                                                        class="performance-badge badge-good"
+                                                    >
+                                                        <i class="bi bi-check-circle-fill"></i>
+                                                        Pass
+                                                    </span>
+
+                                                <?php } else { ?>
+
+                                                    <span
+                                                        class="performance-badge badge-low"
+                                                    >
+                                                        <i class="bi bi-exclamation-circle-fill"></i>
+                                                        Needs Improvement
+                                                    </span>
+
+                                                <?php } ?>
+
+                                            </td>
+
+                                        </tr>
+
+                                    <?php } ?>
+
+                                <?php } else { ?>
+
+                                    <tr>
+
+                                        <td
+                                            colspan="4"
+                                            class="text-center text-muted p-5"
+                                        >
+
+                                            <i
+                                                class="bi bi-journal-x"
+                                                style="font-size: 35px;"
+                                            ></i>
+
+                                            <div class="mt-2">
+                                                No marks available for this student.
+                                            </div>
 
                                         </td>
 
@@ -1319,88 +1432,51 @@ if ($total_subjects > 0) {
 
                                 <?php } ?>
 
-                            <?php } else { ?>
+                                </tbody>
 
-                                <tr>
+                            </table>
 
-                                    <td
-                                        colspan="4"
-                                        class="text-center text-muted p-5"
-                                    >
+                        </div>
 
-                                        <i
-                                            class="bi bi-journal-x"
-                                            style="font-size: 35px;"
-                                        ></i>
+                    </div>
 
-                                        <div class="mt-2">
-                                            No marks available for this student.
-                                        </div>
+                </div>
 
-                                    </td>
+                <div class="report-footer">
 
-                                </tr>
+                    <div>
+                        <i class="bi bi-shield-check"></i>
+                        Generated by Class Management System
+                    </div>
 
-                            <?php } ?>
-
-                            </tbody>
-
-                        </table>
-
+                    <div class="mt-1">
+                        Student Academic Performance Report
                     </div>
 
                 </div>
 
             </div>
 
+        </div>
 
-            <!-- =================================================
-                 FOOTER
-            ================================================== -->
+        <div class="text-center mt-4 no-print">
 
-            <div class="report-footer">
+            <button
+                type="button"
+                onclick="window.print()"
+                class="btn btn-primary px-4"
+            >
 
-                <div>
-                    <i class="bi bi-shield-check"></i>
-                    Generated by Class Management System
-                </div>
+                <i class="bi bi-printer-fill"></i>
+                Print Performance Report
 
-                <div class="mt-1">
-                    Student Academic Performance Report
-                </div>
-
-            </div>
-
+            </button>
 
         </div>
 
-    </div>
+    <?php } elseif ($student_id > 0 && $database_error === '') { ?>
 
-
-    <!-- =================================================
-         PRINT BUTTON
-    ================================================== -->
-
-    <div class="text-center mt-4 no-print">
-
-        <button
-            type="button"
-            onclick="window.print()"
-            class="btn btn-primary px-4"
-        >
-
-            <i class="bi bi-printer-fill"></i>
-            Print Performance Report
-
-        </button>
-
-    </div>
-
-
-    <?php } elseif ($student_id > 0) { ?>
-
-
-        <div class="alert alert-danger">
+        <div class="alert alert-danger no-print">
 
             <i class="bi bi-exclamation-triangle-fill"></i>
 
@@ -1415,11 +1491,9 @@ if ($total_subjects > 0) {
 
         </div>
 
+    <?php } elseif ($student_id === 0 && $database_error === '') { ?>
 
-    <?php } else { ?>
-
-
-        <div class="alert alert-info">
+        <div class="alert alert-info no-print">
 
             <i class="bi bi-info-circle-fill"></i>
 
@@ -1427,9 +1501,7 @@ if ($total_subjects > 0) {
 
         </div>
 
-
     <?php } ?>
-
 
 </div>
 

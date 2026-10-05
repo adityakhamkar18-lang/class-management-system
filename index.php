@@ -1,23 +1,22 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
 /*
 |--------------------------------------------------------------------------
-| CLASS MANAGEMENT SYSTEM
-| ENTRY POINT
+| Class Management System - Entry Point
 |--------------------------------------------------------------------------
-| If the admin is already logged in, go to dashboard.
-| Otherwise, go to login page.
+| Logged-in admin  -> Dashboard
+| Not logged in    -> Login
 |--------------------------------------------------------------------------
 */
 
-if (isset($_SESSION['admin'])) {
-    header("Location: dashboard.php");
-    exit();
+if (isset($_SESSION['admin']) && $_SESSION['admin'] !== '') {
+    header('Location: dashboard.php');
+    exit;
 }
 
-header("Location: login.php");
-exit();
-
-?>
+header('Location: login.php');
+exit;

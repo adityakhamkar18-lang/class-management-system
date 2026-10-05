@@ -1,268 +1,440 @@
+
 <?php
+
+declare(strict_types=1);
+
+/*
+|--------------------------------------------------------------------------
+| Class Management System - Attendance Report
+|--------------------------------------------------------------------------
+| Purpose:
+|   Display a complete attendance report for a selected student.
+|
+| Features:
+|   - Student selection
+|   - Attendance summary
+|   - Present / Absent count
+|   - Attendance percentage
+|   - Attendance level
+|   - Daily attendance history
+|   - Print-friendly report
+|
+| Security:
+|   - Admin authentication
+|   - Prepared statements
+|   - Server-side input validation
+|   - Safe HTML output
+|   - No database errors exposed to users
+|--------------------------------------------------------------------------
+*/
 
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (
+    !isset($_SESSION['admin']) ||
+    !is_string($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database Connection
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
 
-/* -------------------------------------------------------
-   Helper
-------------------------------------------------------- */
-function e($value)
+/*
+|--------------------------------------------------------------------------
+| Helper Functions
+|--------------------------------------------------------------------------
+*/
+function e(mixed $value): string
 {
-    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars(
+        (string) $value,
+        ENT_QUOTES,
+        'UTF-8'
+    );
 }
 
-/* -------------------------------------------------------
-   Initialize
-------------------------------------------------------- */
+function formatDate(string $date): string
+{
+    $timestamp = strtotime($date);
+
+    if ($timestamp === false) {
+        return $date;
+    }
+
+    return date('d M Y', $timestamp);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Initialize Variables
+|--------------------------------------------------------------------------
+*/
 $student_id = 0;
+
 $student = null;
+$students = [];
+$attendance_records = [];
 
 $total_attendance = 0;
 $total_present = 0;
 $total_absent = 0;
-$attendance_percentage = 0;
 
-$attendance_result = false;
+$attendance_percentage = 0.0;
+$progress_percentage = 0.0;
 
-/* -------------------------------------------------------
-   Get Student ID
-------------------------------------------------------- */
-if (isset($_GET['student_id'])) {
-    $student_id = filter_var(
-        $_GET['student_id'],
-        FILTER_VALIDATE_INT
-    );
+$attendance_level = 'No Attendance';
+$progress_class = 'none';
 
-    if ($student_id === false || $student_id <= 0) {
-        $student_id = 0;
-    }
-}
+$database_error = '';
 
-/* -------------------------------------------------------
-   Fetch Students
-------------------------------------------------------- */
-$students = mysqli_query(
-    $conn,
-    "SELECT id, roll_no, name, class_name
-     FROM students
-     ORDER BY name ASC"
-);
+$generated_date = date('d M Y');
 
-if (!$students) {
-    die("Unable to load students.");
-}
+/*
+|--------------------------------------------------------------------------
+| Get Student ID
+|--------------------------------------------------------------------------
+*/
+$raw_student_id = $_GET['student_id'] ?? '';
 
-/* -------------------------------------------------------
-   Fetch Selected Student
-------------------------------------------------------- */
-if ($student_id > 0) {
+if (is_string($raw_student_id)) {
 
-    $student_stmt = mysqli_prepare(
-        $conn,
-        "SELECT id, roll_no, name, email, phone, gender, class_name
-         FROM students
-         WHERE id = ?
-         LIMIT 1"
-    );
-
-    if (!$student_stmt) {
-        die("Unable to load student information.");
-    }
-
-    mysqli_stmt_bind_param(
-        $student_stmt,
-        "i",
-        $student_id
-    );
-
-    mysqli_stmt_execute($student_stmt);
-
-    $student_result = mysqli_stmt_get_result($student_stmt);
+    $raw_student_id = trim($raw_student_id);
 
     if (
-        $student_result &&
-        mysqli_num_rows($student_result) > 0
+        $raw_student_id !== '' &&
+        ctype_digit($raw_student_id)
     ) {
-        $student = mysqli_fetch_assoc($student_result);
+        $student_id = (int) $raw_student_id;
     }
-
-    mysqli_stmt_close($student_stmt);
 }
 
-/* -------------------------------------------------------
-   Attendance Information
-------------------------------------------------------- */
-if ($student) {
+if ($student_id <= 0) {
+    $student_id = 0;
+}
 
-    /* Total */
-    $total_stmt = mysqli_prepare(
-        $conn,
-        "SELECT COUNT(*) AS total
-         FROM attendance
-         WHERE student_id = ?"
+/*
+|--------------------------------------------------------------------------
+| Fetch Students
+|--------------------------------------------------------------------------
+*/
+try {
+
+    $students_stmt = $conn->prepare(
+        'SELECT
+            id,
+            roll_no,
+            name,
+            class_name
+         FROM students
+         ORDER BY name ASC'
     );
 
-    if ($total_stmt) {
+    $students_stmt->execute();
+    $students_stmt->store_result();
 
-        mysqli_stmt_bind_param(
-            $total_stmt,
-            "i",
+    $students_stmt->bind_result(
+        $student_list_id,
+        $student_roll_no,
+        $student_name,
+        $student_class_name
+    );
+
+    while ($students_stmt->fetch()) {
+
+        $students[] = [
+            'id' => (int) $student_list_id,
+            'roll_no' => (string) $student_roll_no,
+            'name' => (string) $student_name,
+            'class_name' => (string) $student_class_name
+        ];
+    }
+
+    $students_stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Attendance report student list error: ' .
+        $e->getMessage()
+    );
+
+    $database_error =
+        'Unable to load the student list. Please try again.';
+}
+
+/*
+|--------------------------------------------------------------------------
+| Fetch Selected Student
+|--------------------------------------------------------------------------
+*/
+if (
+    $student_id > 0 &&
+    $database_error === ''
+) {
+
+    try {
+
+        $student_stmt = $conn->prepare(
+            'SELECT
+                id,
+                roll_no,
+                name,
+                email,
+                phone,
+                gender,
+                class_name
+             FROM students
+             WHERE id = ?
+             LIMIT 1'
+        );
+
+        $student_stmt->bind_param(
+            'i',
             $student_id
         );
 
-        mysqli_stmt_execute($total_stmt);
+        $student_stmt->execute();
+        $student_stmt->store_result();
 
-        $total_result = mysqli_stmt_get_result($total_stmt);
+        if ($student_stmt->num_rows > 0) {
 
-        if ($total_result) {
-
-            $total_data = mysqli_fetch_assoc(
-                $total_result
+            $student_stmt->bind_result(
+                $database_student_id,
+                $database_roll_no,
+                $database_name,
+                $database_email,
+                $database_phone,
+                $database_gender,
+                $database_class_name
             );
 
-            $total_attendance =
-                (int)$total_data['total'];
+            $student_stmt->fetch();
+
+            $student = [
+                'id' => (int) $database_student_id,
+                'roll_no' => (string) $database_roll_no,
+                'name' => (string) $database_name,
+                'email' => (string) $database_email,
+                'phone' => (string) $database_phone,
+                'gender' => (string) $database_gender,
+                'class_name' => (string) $database_class_name
+            ];
         }
 
-        mysqli_stmt_close($total_stmt);
-    }
+        $student_stmt->close();
 
+    } catch (mysqli_sql_exception $e) {
 
-    /* Present */
-    $present_stmt = mysqli_prepare(
-        $conn,
-        "SELECT COUNT(*) AS total
-         FROM attendance
-         WHERE student_id = ?
-         AND status = 'Present'"
-    );
-
-    if ($present_stmt) {
-
-        mysqli_stmt_bind_param(
-            $present_stmt,
-            "i",
-            $student_id
+        error_log(
+            'Class Management System - Attendance report student error: ' .
+            $e->getMessage()
         );
 
-        mysqli_stmt_execute($present_stmt);
-
-        $present_result =
-            mysqli_stmt_get_result($present_stmt);
-
-        if ($present_result) {
-
-            $present_data =
-                mysqli_fetch_assoc($present_result);
-
-            $total_present =
-                (int)$present_data['total'];
-        }
-
-        mysqli_stmt_close($present_stmt);
-    }
-
-
-    /* Absent */
-    $absent_stmt = mysqli_prepare(
-        $conn,
-        "SELECT COUNT(*) AS total
-         FROM attendance
-         WHERE student_id = ?
-         AND status = 'Absent'"
-    );
-
-    if ($absent_stmt) {
-
-        mysqli_stmt_bind_param(
-            $absent_stmt,
-            "i",
-            $student_id
-        );
-
-        mysqli_stmt_execute($absent_stmt);
-
-        $absent_result =
-            mysqli_stmt_get_result($absent_stmt);
-
-        if ($absent_result) {
-
-            $absent_data =
-                mysqli_fetch_assoc($absent_result);
-
-            $total_absent =
-                (int)$absent_data['total'];
-        }
-
-        mysqli_stmt_close($absent_stmt);
-    }
-
-
-    /* Percentage */
-    if ($total_attendance > 0) {
-
-        $attendance_percentage =
-            ($total_present / $total_attendance) * 100;
-    }
-
-
-    /* Attendance Records */
-    $attendance_stmt = mysqli_prepare(
-        $conn,
-        "SELECT attendance_date, status
-         FROM attendance
-         WHERE student_id = ?
-         ORDER BY attendance_date DESC"
-    );
-
-    if ($attendance_stmt) {
-
-        mysqli_stmt_bind_param(
-            $attendance_stmt,
-            "i",
-            $student_id
-        );
-
-        mysqli_stmt_execute($attendance_stmt);
-
-        $attendance_result =
-            mysqli_stmt_get_result(
-                $attendance_stmt
-            );
+        $database_error =
+            'Unable to load student information. Please try again.';
     }
 }
 
-/* -------------------------------------------------------
-   Attendance Level
-------------------------------------------------------- */
-$attendance_level = "No Attendance";
+/*
+|--------------------------------------------------------------------------
+| Fetch Attendance Data
+|--------------------------------------------------------------------------
+*/
+if (
+    $student !== null &&
+    $database_error === ''
+) {
 
-if ($total_attendance > 0) {
+    try {
 
-    if ($attendance_percentage >= 75) {
-        $attendance_level = "Good Attendance";
-    } elseif ($attendance_percentage >= 60) {
-        $attendance_level = "Average Attendance";
-    } else {
-        $attendance_level = "Low Attendance";
+        /*
+        |--------------------------------------------------------------------------
+        | Attendance Summary
+        |--------------------------------------------------------------------------
+        | Calculate totals directly in MySQL.
+        |--------------------------------------------------------------------------
+        */
+        $summary_stmt = $conn->prepare(
+            'SELECT
+                COUNT(*) AS total_days,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = "Present" THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS present_days,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status = "Absent" THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS absent_days
+             FROM attendance
+             WHERE student_id = ?'
+        );
+
+        $summary_stmt->bind_param(
+            'i',
+            $student_id
+        );
+
+        $summary_stmt->execute();
+
+        $summary_stmt->bind_result(
+            $database_total_days,
+            $database_present_days,
+            $database_absent_days
+        );
+
+        if ($summary_stmt->fetch()) {
+
+            $total_attendance = (int) $database_total_days;
+            $total_present = (int) $database_present_days;
+            $total_absent = (int) $database_absent_days;
+        }
+
+        $summary_stmt->close();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Fetch Daily Attendance Records
+        |--------------------------------------------------------------------------
+        */
+        $attendance_stmt = $conn->prepare(
+            'SELECT
+                id,
+                attendance_date,
+                status
+             FROM attendance
+             WHERE student_id = ?
+             ORDER BY attendance_date DESC, id DESC'
+        );
+
+        $attendance_stmt->bind_param(
+            'i',
+            $student_id
+        );
+
+        $attendance_stmt->execute();
+        $attendance_stmt->store_result();
+
+        $attendance_stmt->bind_result(
+            $attendance_record_id,
+            $attendance_date,
+            $attendance_status
+        );
+
+        while ($attendance_stmt->fetch()) {
+
+            $attendance_records[] = [
+                'id' => (int) $attendance_record_id,
+                'attendance_date' => (string) $attendance_date,
+                'status' => (string) $attendance_status
+            ];
+        }
+
+        $attendance_stmt->close();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Calculate Attendance Percentage
+        |--------------------------------------------------------------------------
+        */
+        if ($total_attendance > 0) {
+
+            $attendance_percentage =
+                ($total_present / $total_attendance) * 100;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Determine Attendance Level
+        |--------------------------------------------------------------------------
+        */
+        if ($total_attendance === 0) {
+
+            $attendance_level = 'No Attendance';
+            $progress_class = 'none';
+
+        } elseif ($attendance_percentage >= 75) {
+
+            $attendance_level = 'Good Attendance';
+            $progress_class = 'good';
+
+        } elseif ($attendance_percentage >= 60) {
+
+            $attendance_level = 'Average Attendance';
+            $progress_class = 'average';
+
+        } else {
+
+            $attendance_level = 'Low Attendance';
+            $progress_class = 'low';
+        }
+
+    } catch (mysqli_sql_exception $e) {
+
+        error_log(
+            'Class Management System - Attendance report records error: ' .
+            $e->getMessage()
+        );
+
+        $database_error =
+            'Unable to load attendance records. Please try again.';
     }
 }
 
-/* -------------------------------------------------------
-   Progress Class
-------------------------------------------------------- */
-$progress_class = "low";
+/*
+|--------------------------------------------------------------------------
+| Safe Progress Percentage
+|--------------------------------------------------------------------------
+*/
+$progress_percentage = min(
+    100,
+    max(
+        0,
+        $attendance_percentage
+    )
+);
 
-if ($attendance_percentage >= 75) {
-    $progress_class = "good";
-} elseif ($attendance_percentage >= 60) {
-    $progress_class = "average";
+/*
+|--------------------------------------------------------------------------
+| Student Initial
+|--------------------------------------------------------------------------
+*/
+$student_initial = '?';
+
+if (
+    $student !== null &&
+    $student['name'] !== ''
+) {
+
+    $student_initial = strtoupper(
+        mb_substr(
+            $student['name'],
+            0,
+            1,
+            'UTF-8'
+        )
+    );
 }
 
 ?>
@@ -277,6 +449,11 @@ if ($attendance_percentage >= 75) {
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
     >
 
     <title>
@@ -302,13 +479,9 @@ if ($attendance_percentage >= 75) {
         body {
             margin: 0;
             background: #f1f5f3;
-            font-family: Arial, sans-serif;
+            font-family: Arial, Helvetica, sans-serif;
             color: #1f2937;
         }
-
-        /* =================================================
-           TOP BAR
-        ================================================= */
 
         .top-bar {
             background: #064e3b;
@@ -328,10 +501,6 @@ if ($attendance_percentage >= 75) {
             display: flex;
             gap: 10px;
         }
-
-        /* =================================================
-           PAGE
-        ================================================= */
 
         .page-wrapper {
             max-width: 1250px;
@@ -359,10 +528,6 @@ if ($attendance_percentage >= 75) {
             color: #6b7280;
         }
 
-        /* =================================================
-           STUDENT SELECTOR
-        ================================================= */
-
         .selection-card {
             background: white;
             border-radius: 16px;
@@ -378,16 +543,19 @@ if ($attendance_percentage >= 75) {
 
         .form-select {
             min-height: 46px;
+            border-radius: 8px;
+        }
+
+        .form-select:focus {
+            border-color: #16a34a;
+            box-shadow: 0 0 0 0.2rem rgba(22, 163, 74, 0.15);
         }
 
         .view-button {
             min-height: 46px;
             font-weight: 600;
+            border-radius: 8px;
         }
-
-        /* =================================================
-           ATTENDANCE DASHBOARD
-        ================================================= */
 
         .attendance-sheet {
             background: white;
@@ -428,7 +596,7 @@ if ($attendance_percentage >= 75) {
             width: 78px;
             height: 78px;
             border-radius: 18px;
-            background: rgba(255,255,255,0.18);
+            background: rgba(255, 255, 255, 0.18);
             display: flex;
             justify-content: center;
             align-items: center;
@@ -438,10 +606,6 @@ if ($attendance_percentage >= 75) {
         .attendance-content {
             padding: 30px;
         }
-
-        /* =================================================
-           STUDENT SUMMARY
-        ================================================= */
 
         .student-summary {
             display: flex;
@@ -478,10 +642,6 @@ if ($attendance_percentage >= 75) {
             margin: 0;
             color: #64748b;
         }
-
-        /* =================================================
-           ATTENDANCE OVERVIEW
-        ================================================= */
 
         .overview-grid {
             display: grid;
@@ -549,10 +709,6 @@ if ($attendance_percentage >= 75) {
             margin-top: 4px;
         }
 
-        /* =================================================
-           ATTENDANCE PERCENTAGE
-        ================================================= */
-
         .percentage-panel {
             background: #f8fafc;
             border-radius: 18px;
@@ -577,7 +733,7 @@ if ($attendance_percentage >= 75) {
             position: relative;
             background: conic-gradient(
                 #16a34a
-                <?php echo min(100, max(0, $attendance_percentage)); ?>%,
+                <?php echo e($progress_percentage); ?>%,
                 #dbe4df
                 0
             );
@@ -638,6 +794,10 @@ if ($attendance_percentage >= 75) {
             background: #dc2626;
         }
 
+        .progress-none {
+            background: #94a3b8;
+        }
+
         .attendance-status {
             display: inline-block;
             margin-top: 12px;
@@ -666,10 +826,6 @@ if ($attendance_percentage >= 75) {
             background: #e5e7eb;
             color: #4b5563;
         }
-
-        /* =================================================
-           ATTENDANCE RECORDS
-        ================================================= */
 
         .records-header {
             display: flex;
@@ -737,9 +893,23 @@ if ($attendance_percentage >= 75) {
             color: #374151;
         }
 
-        /* =================================================
-           FOOTER
-        ================================================= */
+        .empty-report {
+            background: white;
+            border-radius: 18px;
+            padding: 45px 25px;
+            text-align: center;
+            box-shadow: 0 5px 20px rgba(15, 23, 42, 0.06);
+        }
+
+        .empty-report-icon {
+            font-size: 50px;
+            color: #94a3b8;
+        }
+
+        .empty-report h4 {
+            margin-top: 15px;
+            font-weight: 700;
+        }
 
         .report-footer {
             margin-top: 30px;
@@ -750,16 +920,15 @@ if ($attendance_percentage >= 75) {
             font-size: 13px;
         }
 
-        /* =================================================
-           RESPONSIVE
-        ================================================= */
+        .print-date {
+            display: none;
+        }
 
         @media (max-width: 1000px) {
 
             .overview-grid {
                 grid-template-columns: 1fr 1fr;
             }
-
         }
 
         @media (max-width: 768px) {
@@ -789,10 +958,23 @@ if ($attendance_percentage >= 75) {
                 flex-direction: column;
                 align-items: flex-start;
             }
-
         }
 
         @media (max-width: 576px) {
+
+            .top-bar {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .top-actions {
+                width: 100%;
+            }
+
+            .top-actions .btn {
+                flex: 1;
+            }
 
             .overview-grid {
                 grid-template-columns: 1fr;
@@ -806,11 +988,14 @@ if ($attendance_percentage >= 75) {
                 font-size: 24px;
             }
 
-        }
+            .student-summary p {
+                line-height: 1.7;
+            }
 
-        /* =================================================
-           PRINT
-        ================================================= */
+            .selection-card {
+                padding: 18px;
+            }
+        }
 
         @media print {
 
@@ -847,6 +1032,14 @@ if ($attendance_percentage >= 75) {
                 print-color-adjust: exact;
             }
 
+            .print-date {
+                display: block;
+                margin-top: 5px;
+            }
+
+            .report-footer {
+                margin-top: 20px;
+            }
         }
 
     </style>
@@ -854,11 +1047,6 @@ if ($attendance_percentage >= 75) {
 </head>
 
 <body>
-
-
-<!-- =====================================================
-     TOP BAR
-====================================================== -->
 
 <div class="top-bar no-print">
 
@@ -896,10 +1084,6 @@ if ($attendance_percentage >= 75) {
 <div class="page-wrapper">
 
 
-    <!-- =================================================
-         PAGE HEADER
-    ================================================== -->
-
     <div class="page-header no-print">
 
         <h1>
@@ -917,9 +1101,21 @@ if ($attendance_percentage >= 75) {
     </div>
 
 
-    <!-- =================================================
-         STUDENT SELECTION
-    ================================================== -->
+    <?php if ($database_error !== ''): ?>
+
+        <div
+            class="alert alert-danger no-print"
+            role="alert"
+        >
+
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>
+
+            <?php echo e($database_error); ?>
+
+        </div>
+
+    <?php endif; ?>
+
 
     <div class="selection-card no-print">
 
@@ -931,7 +1127,10 @@ if ($attendance_percentage >= 75) {
 
         </div>
 
-        <form method="GET">
+        <form
+            method="GET"
+            action="attendance_report.php"
+        >
 
             <div class="row g-3">
 
@@ -947,53 +1146,33 @@ if ($attendance_percentage >= 75) {
                             -- Select Student --
                         </option>
 
-                        <?php
-
-                        if (
-                            $students &&
-                            mysqli_num_rows($students) > 0
-                        ) {
-
-                            while (
-                                $s =
-                                mysqli_fetch_assoc($students)
-                            ) {
-
-                        ?>
+                        <?php foreach ($students as $s): ?>
 
                             <option
-                                value="<?php echo (int)$s['id']; ?>"
+                                value="<?php echo (int) $s['id']; ?>"
                                 <?php
                                 echo (
                                     $student_id ===
-                                    (int)$s['id']
+                                    (int) $s['id']
                                 )
                                     ? 'selected'
                                     : '';
                                 ?>
                             >
-
                                 <?php
-
                                 echo e(
                                     $s['roll_no'] .
-                                    " - " .
+                                    ' - ' .
                                     $s['name'] .
-                                    " - " .
+                                    ' - ' .
                                     $s['class_name']
                                 );
-
                                 ?>
-
                             </option>
 
-                        <?php
+                        <?php endforeach; ?>
 
-                            }
-
-                        } else {
-
-                        ?>
+                        <?php if (empty($students)): ?>
 
                             <option
                                 value=""
@@ -1002,7 +1181,7 @@ if ($attendance_percentage >= 75) {
                                 No students available
                             </option>
 
-                        <?php } ?>
+                        <?php endif; ?>
 
                     </select>
 
@@ -1013,11 +1192,16 @@ if ($attendance_percentage >= 75) {
                     <button
                         type="submit"
                         class="btn btn-success w-100 view-button"
+                        <?php
+                        echo empty($students)
+                            ? 'disabled'
+                            : '';
+                        ?>
                     >
 
                         <i class="bi bi-calendar-check-fill"></i>
 
-                        View Attendance
+                        View
 
                     </button>
 
@@ -1030,17 +1214,9 @@ if ($attendance_percentage >= 75) {
     </div>
 
 
-    <?php if ($student) { ?>
-
-
-    <!-- =================================================
-         ATTENDANCE SHEET
-    ================================================== -->
+    <?php if ($student !== null && $database_error === ''): ?>
 
     <div class="attendance-sheet">
-
-
-        <!-- Attendance Header -->
 
         <div class="attendance-header">
 
@@ -1049,15 +1225,15 @@ if ($attendance_percentage >= 75) {
                 <div>
 
                     <div class="attendance-title">
-
                         Student Attendance Report
-
                     </div>
 
                     <div class="attendance-subtitle">
-
                         Attendance history and participation summary
+                    </div>
 
+                    <div class="print-date">
+                        Generated on: <?php echo e($generated_date); ?>
                     </div>
 
                 </div>
@@ -1076,23 +1252,11 @@ if ($attendance_percentage >= 75) {
         <div class="attendance-content">
 
 
-            <!-- =================================================
-                 STUDENT SUMMARY
-            ================================================== -->
-
             <div class="student-summary">
 
                 <div class="student-avatar">
 
-                    <?php
-                    echo strtoupper(
-                        substr(
-                            $student['name'],
-                            0,
-                            1
-                        )
-                    );
-                    ?>
+                    <?php echo e($student_initial); ?>
 
                 </div>
 
@@ -1123,21 +1287,13 @@ if ($attendance_percentage >= 75) {
             </div>
 
 
-            <!-- =================================================
-                 ATTENDANCE OVERVIEW
-            ================================================== -->
-
             <div class="overview-grid">
 
-
-                <!-- Total -->
 
                 <div class="overview-card total">
 
                     <div class="overview-icon">
-
                         <i class="bi bi-calendar3"></i>
-
                     </div>
 
                     <div class="overview-label">
@@ -1145,24 +1301,16 @@ if ($attendance_percentage >= 75) {
                     </div>
 
                     <div class="overview-number">
-
-                        <?php
-                        echo $total_attendance;
-                        ?>
-
+                        <?php echo $total_attendance; ?>
                     </div>
 
                 </div>
 
 
-                <!-- Present -->
-
                 <div class="overview-card present">
 
                     <div class="overview-icon">
-
                         <i class="bi bi-check-circle-fill"></i>
-
                     </div>
 
                     <div class="overview-label">
@@ -1170,24 +1318,16 @@ if ($attendance_percentage >= 75) {
                     </div>
 
                     <div class="overview-number text-success">
-
-                        <?php
-                        echo $total_present;
-                        ?>
-
+                        <?php echo $total_present; ?>
                     </div>
 
                 </div>
 
 
-                <!-- Absent -->
-
                 <div class="overview-card absent">
 
                     <div class="overview-icon">
-
                         <i class="bi bi-x-circle-fill"></i>
-
                     </div>
 
                     <div class="overview-label">
@@ -1195,24 +1335,16 @@ if ($attendance_percentage >= 75) {
                     </div>
 
                     <div class="overview-number text-danger">
-
-                        <?php
-                        echo $total_absent;
-                        ?>
-
+                        <?php echo $total_absent; ?>
                     </div>
 
                 </div>
 
 
-                <!-- Percentage -->
-
                 <div class="overview-card percentage">
 
                     <div class="overview-icon">
-
                         <i class="bi bi-percent"></i>
-
                     </div>
 
                     <div class="overview-label">
@@ -1222,12 +1354,10 @@ if ($attendance_percentage >= 75) {
                     <div class="overview-number text-success">
 
                         <?php
-
                         echo number_format(
                             $attendance_percentage,
                             2
                         );
-
                         ?>%
 
                     </div>
@@ -1237,28 +1367,20 @@ if ($attendance_percentage >= 75) {
             </div>
 
 
-            <!-- =================================================
-                 ATTENDANCE PERCENTAGE PANEL
-            ================================================== -->
-
             <div class="percentage-panel">
 
                 <div class="percentage-layout">
 
-
-                    <!-- Circle -->
 
                     <div class="attendance-circle">
 
                         <div class="circle-value">
 
                             <?php
-
                             echo number_format(
                                 $attendance_percentage,
                                 0
                             );
-
                             ?>%
 
                         </div>
@@ -1266,37 +1388,44 @@ if ($attendance_percentage >= 75) {
                     </div>
 
 
-                    <!-- Information -->
-
                     <div class="percentage-info">
 
                         <h4>
-
                             Attendance Overview
-
                         </h4>
 
-                        <p>
+                        <?php if ($total_attendance > 0): ?>
 
-                            The student attended
-                            <strong>
-                                <?php echo $total_present; ?>
-                            </strong>
-                            out of
-                            <strong>
-                                <?php echo $total_attendance; ?>
-                            </strong>
-                            recorded days.
+                            <p>
 
-                        </p>
+                                The student attended
+                                <strong>
+                                    <?php echo $total_present; ?>
+                                </strong>
+                                out of
+                                <strong>
+                                    <?php echo $total_attendance; ?>
+                                </strong>
+                                recorded days.
+
+                            </p>
+
+                        <?php else: ?>
+
+                            <p>
+                                No attendance has been recorded
+                                for this student yet.
+                            </p>
+
+                        <?php endif; ?>
 
 
                         <div class="attendance-progress">
 
                             <div
                                 class="attendance-progress-bar
-                                progress-<?php echo $progress_class; ?>"
-                                style="width: <?php echo min(100, max(0, $attendance_percentage)); ?>%;"
+                                progress-<?php echo e($progress_class); ?>"
+                                style="width: <?php echo e($progress_percentage); ?>%;"
                             ></div>
 
                         </div>
@@ -1304,26 +1433,26 @@ if ($attendance_percentage >= 75) {
 
                         <span
                             class="attendance-status
-                            status-<?php echo $progress_class; ?>"
+                            status-<?php echo e($progress_class); ?>"
                         >
 
-                            <?php
+                            <?php if ($progress_class === 'good'): ?>
 
-                            if ($progress_class === 'good') {
+                                <i class="bi bi-check-circle-fill"></i>
 
-                                echo '<i class="bi bi-check-circle-fill"></i>';
+                            <?php elseif ($progress_class === 'average'): ?>
 
-                            } elseif ($progress_class === 'average') {
+                                <i class="bi bi-exclamation-circle-fill"></i>
 
-                                echo '<i class="bi bi-exclamation-circle-fill"></i>';
+                            <?php elseif ($progress_class === 'low'): ?>
 
-                            } else {
+                                <i class="bi bi-exclamation-triangle-fill"></i>
 
-                                echo '<i class="bi bi-exclamation-triangle-fill"></i>';
+                            <?php else: ?>
 
-                            }
+                                <i class="bi bi-dash-circle-fill"></i>
 
-                            ?>
+                            <?php endif; ?>
 
                             <?php echo e($attendance_level); ?>
 
@@ -1335,10 +1464,6 @@ if ($attendance_percentage >= 75) {
 
             </div>
 
-
-            <!-- =================================================
-                 ATTENDANCE RECORDS
-            ================================================== -->
 
             <div class="records-header">
 
@@ -1389,127 +1514,91 @@ if ($attendance_percentage >= 75) {
 
                         <tbody>
 
-                        <?php
+                        <?php if (!empty($attendance_records)): ?>
 
-                        if (
-                            $attendance_result &&
-                            mysqli_num_rows(
-                                $attendance_result
-                            ) > 0
-                        ) {
+                            <?php foreach (
+                                $attendance_records
+                                as $index => $attendance
+                            ): ?>
 
-                            $sr_no = 1;
+                                <tr>
 
-                            while (
-                                $attendance =
-                                mysqli_fetch_assoc(
-                                    $attendance_result
-                                )
-                            ) {
+                                    <td>
+                                        <?php echo $index + 1; ?>
+                                    </td>
 
-                        ?>
+                                    <td class="date-cell">
 
-                            <tr>
+                                        <i
+                                            class="bi bi-calendar-event date-icon"
+                                        ></i>
 
-                                <td>
+                                        <?php
+                                        echo e(
+                                            formatDate(
+                                                $attendance[
+                                                    'attendance_date'
+                                                ]
+                                            )
+                                        );
+                                        ?>
 
-                                    <?php
-                                    echo $sr_no++;
-                                    ?>
+                                    </td>
 
-                                </td>
+                                    <td>
 
-                                <td class="date-cell">
+                                        <?php
+                                        $record_status =
+                                            $attendance['status'];
+                                        ?>
 
-                                    <i
-                                        class="bi bi-calendar-event date-icon"
-                                    ></i>
+                                        <?php if ($record_status === 'Present'): ?>
 
-                                    <?php
+                                            <span
+                                                class="attendance-badge present-badge"
+                                            >
 
-                                    echo e(
-                                        $attendance[
-                                            'attendance_date'
-                                        ]
-                                    );
+                                                <i class="bi bi-check-circle-fill"></i>
 
-                                    ?>
+                                                Present
 
-                                </td>
+                                            </span>
 
-                                <td>
+                                        <?php elseif ($record_status === 'Absent'): ?>
 
-                                    <?php
+                                            <span
+                                                class="attendance-badge absent-badge"
+                                            >
 
-                                    if (
-                                        $attendance['status']
-                                        === 'Present'
-                                    ) {
+                                                <i class="bi bi-x-circle-fill"></i>
 
-                                    ?>
+                                                Absent
 
-                                        <span
-                                            class="attendance-badge present-badge"
-                                        >
+                                            </span>
 
-                                            <i class="bi bi-check-circle-fill"></i>
+                                        <?php else: ?>
 
-                                            Present
+                                            <span
+                                                class="attendance-badge other-badge"
+                                            >
 
-                                        </span>
+                                                <?php
+                                                echo e(
+                                                    $record_status
+                                                );
+                                                ?>
 
-                                    <?php
+                                            </span>
 
-                                    } elseif (
-                                        $attendance['status']
-                                        === 'Absent'
-                                    ) {
+                                        <?php endif; ?>
 
-                                    ?>
+                                    </td>
 
-                                        <span
-                                            class="attendance-badge absent-badge"
-                                        >
+                                </tr>
 
-                                            <i class="bi bi-x-circle-fill"></i>
+                            <?php endforeach; ?>
 
-                                            Absent
-
-                                        </span>
-
-                                    <?php
-
-                                    } else {
-
-                                    ?>
-
-                                        <span
-                                            class="attendance-badge other-badge"
-                                        >
-
-                                            <?php
-
-                                            echo e(
-                                                $attendance['status']
-                                            );
-
-                                            ?>
-
-                                        </span>
-
-                                    <?php } ?>
-
-                                </td>
-
-                            </tr>
-
-                        <?php
-
-                            }
-
-                        } else {
-
-                        ?>
+                        <?php else: ?>
 
                             <tr>
 
@@ -1524,16 +1613,14 @@ if ($attendance_percentage >= 75) {
                                     ></i>
 
                                     <div class="mt-2">
-
                                         No attendance records available.
-
                                     </div>
 
                                 </td>
 
                             </tr>
 
-                        <?php } ?>
+                        <?php endif; ?>
 
                         </tbody>
 
@@ -1543,10 +1630,6 @@ if ($attendance_percentage >= 75) {
 
             </div>
 
-
-            <!-- =================================================
-                 FOOTER
-            ================================================== -->
 
             <div class="report-footer">
 
@@ -1564,6 +1647,13 @@ if ($attendance_percentage >= 75) {
 
                 </div>
 
+                <div class="mt-1">
+
+                    Report Date:
+                    <?php echo e($generated_date); ?>
+
+                </div>
+
             </div>
 
 
@@ -1571,10 +1661,6 @@ if ($attendance_percentage >= 75) {
 
     </div>
 
-
-    <!-- =================================================
-         PRINT BUTTON
-    ================================================== -->
 
     <div class="text-center mt-4 no-print">
 
@@ -1593,38 +1679,68 @@ if ($attendance_percentage >= 75) {
     </div>
 
 
-    <?php } elseif ($student_id > 0) { ?>
+    <?php elseif (
+        $student_id > 0 &&
+        $database_error === ''
+    ): ?>
 
+        <div class="empty-report">
 
-        <div class="alert alert-danger">
+            <div class="empty-report-icon">
 
-            <i class="bi bi-exclamation-triangle-fill"></i>
+                <i class="bi bi-person-x-fill"></i>
 
-            Student not found.
+            </div>
+
+            <h4>
+                Student Not Found
+            </h4>
+
+            <p class="text-muted">
+                The selected student could not be found.
+            </p>
 
             <a
                 href="attendance_report.php"
-                class="alert-link"
+                class="btn btn-success"
             >
-                Try again
+
+                <i class="bi bi-arrow-left"></i>
+
+                Select Another Student
+
             </a>
 
         </div>
 
 
-    <?php } else { ?>
+    <?php elseif (
+        $student_id === 0 &&
+        $database_error === ''
+    ): ?>
 
+        <div class="empty-report">
 
-        <div class="alert alert-info">
+            <div class="empty-report-icon">
 
-            <i class="bi bi-info-circle-fill"></i>
+                <i class="bi bi-person-check-fill"></i>
 
-            Please select a student to view the attendance report.
+            </div>
+
+            <h4>
+                Select a Student
+            </h4>
+
+            <p class="text-muted">
+
+                Choose a student from the list above
+                to view their attendance report.
+
+            </p>
 
         </div>
 
-
-    <?php } ?>
+    <?php endif; ?>
 
 
 </div>

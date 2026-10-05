@@ -1,20 +1,19 @@
 <?php
 
+declare(strict_types=1);
+
 /*
 |--------------------------------------------------------------------------
-| Start Secure Session
+| Class Management System - Login Processing
+|--------------------------------------------------------------------------
+| Handles administrator authentication.
 |--------------------------------------------------------------------------
 */
 
 session_start();
 
-/*
-|--------------------------------------------------------------------------
-| Database Connection
-|--------------------------------------------------------------------------
-*/
+require_once __DIR__ . '/config.php';
 
-require_once "config.php";
 
 /*
 |--------------------------------------------------------------------------
@@ -22,12 +21,11 @@ require_once "config.php";
 |--------------------------------------------------------------------------
 */
 
-if ($_SERVER["REQUEST_METHOD"] !== "POST") {
-
-    header("Location: login.php");
-    exit();
-
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: login.php');
+    exit;
 }
+
 
 /*
 |--------------------------------------------------------------------------
@@ -35,8 +33,9 @@ if ($_SERVER["REQUEST_METHOD"] !== "POST") {
 |--------------------------------------------------------------------------
 */
 
-$username = trim($_POST["username"] ?? "");
-$password = $_POST["password"] ?? "";
+$username = trim((string) ($_POST['username'] ?? ''));
+$password = (string) ($_POST['password'] ?? '');
+
 
 /*
 |--------------------------------------------------------------------------
@@ -44,50 +43,31 @@ $password = $_POST["password"] ?? "";
 |--------------------------------------------------------------------------
 */
 
-if ($username === "" || $password === "") {
+if ($username === '' || $password === '') {
 
-    $_SESSION["login_error"] =
-        "Please enter your username and password.";
+    $_SESSION['login_error'] =
+        'Please enter your username and password.';
 
-    header("Location: login.php");
-    exit();
-
+    header('Location: login.php');
+    exit;
 }
+
 
 /*
 |--------------------------------------------------------------------------
-| Username Validation
+| Validate Username Length
 |--------------------------------------------------------------------------
-|
-| Prevent unnecessarily large input from reaching the database.
-|
 */
 
 if (strlen($username) > 50) {
 
-    $_SESSION["login_error"] =
-        "Invalid username or password.";
+    $_SESSION['login_error'] =
+        'Invalid username or password.';
 
-    header("Location: login.php");
-    exit();
-
+    header('Location: login.php');
+    exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Check Database Connection
-|--------------------------------------------------------------------------
-*/
-
-if (!$conn || mysqli_connect_errno()) {
-
-    $_SESSION["login_error"] =
-        "Unable to connect to the system. Please try again later.";
-
-    header("Location: login.php");
-    exit();
-
-}
 
 /*
 |--------------------------------------------------------------------------
@@ -95,83 +75,53 @@ if (!$conn || mysqli_connect_errno()) {
 |--------------------------------------------------------------------------
 */
 
-$sql = "
-    SELECT
-        id,
-        username,
-        password
-    FROM admin
-    WHERE username = ?
-    LIMIT 1
-";
+try {
 
-$stmt = mysqli_prepare($conn, $sql);
+    $sql = "
+        SELECT
+            id,
+            username,
+            password
+        FROM admin
+        WHERE username = ?
+        LIMIT 1
+    ";
 
-/*
-|--------------------------------------------------------------------------
-| Handle Statement Error
-|--------------------------------------------------------------------------
-*/
+    $stmt = $conn->prepare($sql);
 
-if (!$stmt) {
+    $stmt->bind_param('s', $username);
 
-    $_SESSION["login_error"] =
-        "Unable to process login. Please try again later.";
+    $stmt->execute();
 
-    header("Location: login.php");
-    exit();
+    $result = $stmt->get_result();
 
+    $admin = $result->fetch_assoc() ?: null;
+
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    /*
+    |--------------------------------------------------------------------------
+    | Log Technical Error
+    |--------------------------------------------------------------------------
+    |
+    | Never display the actual database error to the visitor.
+    |
+    */
+
+    error_log(
+        'Class Management System - Login database error: ' .
+        $e->getMessage()
+    );
+
+    $_SESSION['login_error'] =
+        'Unable to process login. Please try again later.';
+
+    header('Location: login.php');
+    exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Bind Username
-|--------------------------------------------------------------------------
-*/
-
-mysqli_stmt_bind_param(
-    $stmt,
-    "s",
-    $username
-);
-
-/*
-|--------------------------------------------------------------------------
-| Execute Query
-|--------------------------------------------------------------------------
-*/
-
-if (!mysqli_stmt_execute($stmt)) {
-
-    mysqli_stmt_close($stmt);
-
-    $_SESSION["login_error"] =
-        "Unable to process login. Please try again later.";
-
-    header("Location: login.php");
-    exit();
-
-}
-
-/*
-|--------------------------------------------------------------------------
-| Get Result
-|--------------------------------------------------------------------------
-*/
-
-$result = mysqli_stmt_get_result($stmt);
-
-$admin = $result
-    ? mysqli_fetch_assoc($result)
-    : null;
-
-/*
-|--------------------------------------------------------------------------
-| Close Statement
-|--------------------------------------------------------------------------
-*/
-
-mysqli_stmt_close($stmt);
 
 /*
 |--------------------------------------------------------------------------
@@ -180,42 +130,42 @@ mysqli_stmt_close($stmt);
 */
 
 if (
-    $admin &&
-    isset($admin["password"]) &&
-    password_verify(
-        $password,
-        $admin["password"]
-    )
+    $admin !== null &&
+    isset($admin['password']) &&
+    is_string($admin['password']) &&
+    password_verify($password, $admin['password'])
 ) {
 
     /*
     |--------------------------------------------------------------------------
-    | Regenerate Session ID
+    | Prevent Session Fixation
     |--------------------------------------------------------------------------
-    |
-    | Helps protect against session fixation attacks.
-    |
     */
 
     session_regenerate_id(true);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Store Admin Session
-    |--------------------------------------------------------------------------
-    */
-
-    $_SESSION["admin"] = $admin["username"];
-
-    $_SESSION["admin_id"] = (int) $admin["id"];
 
     /*
     |--------------------------------------------------------------------------
-    | Store Login Timestamp
+    | Store Authenticated Admin Information
     |--------------------------------------------------------------------------
     */
 
-    $_SESSION["login_time"] = time();
+    $_SESSION['admin'] = (string) $admin['username'];
+
+    $_SESSION['admin_id'] = (int) $admin['id'];
+
+    $_SESSION['login_time'] = time();
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Remove Any Previous Login Error
+    |--------------------------------------------------------------------------
+    */
+
+    unset($_SESSION['login_error']);
+
 
     /*
     |--------------------------------------------------------------------------
@@ -223,23 +173,24 @@ if (
     |--------------------------------------------------------------------------
     */
 
-    header("Location: dashboard.php");
-    exit();
-
+    header('Location: dashboard.php');
+    exit;
 }
+
 
 /*
 |--------------------------------------------------------------------------
 | Login Failed
 |--------------------------------------------------------------------------
 |
-| Keep the message generic so we don't reveal whether the username
-| exists in the database.
-|
+| Keep the error generic.
+| Do not reveal whether the username exists.
+|--------------------------------------------------------------------------
 */
 
-$_SESSION["login_error"] =
-    "Invalid username or password.";
+$_SESSION['login_error'] =
+    'Invalid username or password.';
+
 
 /*
 |--------------------------------------------------------------------------
@@ -247,7 +198,5 @@ $_SESSION["login_error"] =
 |--------------------------------------------------------------------------
 */
 
-header("Location: login.php");
-exit();
-
-?>
+header('Location: login.php');
+exit;

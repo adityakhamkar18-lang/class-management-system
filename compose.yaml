@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: class_management_app
+    ports:
+      - "8080:80"
+    environment:
+      DB_HOST: db
+      DB_USER: class_user
+      DB_PASS: class_password
+      DB_NAME: class_management
+      DB_PORT: 3306
+      ADMIN_RESET_KEY: change-this-reset-key
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.0
+    container_name: class_management_db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: class_management
+      MYSQL_USER: class_user
+      MYSQL_PASSWORD: class_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - class_management_db_data:/var/lib/mysql
+      - ./class_management.sql:/docker-entrypoint-initdb.d/class_management.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "root",
+          "-proot_password"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  class_management_db_data:

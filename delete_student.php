@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
 /*
@@ -7,28 +9,84 @@ session_start();
 | Admin Authentication
 |--------------------------------------------------------------------------
 */
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-include("config.php");
+/*
+|--------------------------------------------------------------------------
+| Database Connection
+|--------------------------------------------------------------------------
+*/
+
+require_once __DIR__ . '/config.php';
+
+/*
+|--------------------------------------------------------------------------
+| Delete Requests Must Use POST
+|--------------------------------------------------------------------------
+*/
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    header('Location: students.php');
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| CSRF Protection
+|--------------------------------------------------------------------------
+*/
+
+$session_token = $_SESSION['csrf_token'] ?? '';
+$submitted_token = (string) ($_POST['csrf_token'] ?? '');
+
+if (
+    !is_string($session_token) ||
+    $session_token === '' ||
+    $submitted_token === '' ||
+    !hash_equals($session_token, $submitted_token)
+) {
+    $_SESSION['student_delete_error'] =
+        'Invalid request. Please try again.';
+
+    header('Location: students.php');
+    exit;
+}
 
 /*
 |--------------------------------------------------------------------------
 | Get Student ID
 |--------------------------------------------------------------------------
 */
-$id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+
+$id = filter_input(
+    INPUT_POST,
+    'id',
+    FILTER_VALIDATE_INT
+);
 
 /*
 |--------------------------------------------------------------------------
-| Validate ID
+| Validate Student ID
 |--------------------------------------------------------------------------
 */
-if (!$id || $id <= 0) {
-    header("Location: students.php");
-    exit();
+
+if (
+    $id === false ||
+    $id === null ||
+    $id <= 0
+) {
+    $_SESSION['student_delete_error'] =
+        'Invalid student ID.';
+
+    header('Location: students.php');
+    exit;
 }
 
 /*
@@ -36,18 +94,47 @@ if (!$id || $id <= 0) {
 | Delete Student
 |--------------------------------------------------------------------------
 */
-$stmt = mysqli_prepare(
-    $conn,
-    "DELETE FROM students WHERE id = ?"
-);
 
-if ($stmt) {
+try {
 
-    mysqli_stmt_bind_param($stmt, "i", $id);
+    $stmt = $conn->prepare(
+        'DELETE FROM students WHERE id = ?'
+    );
 
-    mysqli_stmt_execute($stmt);
+    $stmt->bind_param('i', $id);
 
-    mysqli_stmt_close($stmt);
+    $stmt->execute();
+
+    if ($stmt->affected_rows === 0) {
+        $_SESSION['student_delete_error'] =
+            'Student record was not found.';
+    } else {
+        $_SESSION['student_delete_success'] =
+            'Student deleted successfully.';
+    }
+
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Delete student error: ' .
+        $e->getMessage()
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Foreign-Key / Database Constraint Handling
+    |--------------------------------------------------------------------------
+    */
+
+    if ((int) $e->getCode() === 1451) {
+        $_SESSION['student_delete_error'] =
+            'This student cannot be deleted because related records exist.';
+    } else {
+        $_SESSION['student_delete_error'] =
+            'Unable to delete the student. Please try again later.';
+    }
 }
 
 /*
@@ -55,7 +142,6 @@ if ($stmt) {
 | Return to Students Page
 |--------------------------------------------------------------------------
 */
-header("Location: students.php");
-exit();
 
-?>
+header('Location: students.php');
+exit;

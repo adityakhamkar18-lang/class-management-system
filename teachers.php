@@ -1,83 +1,224 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Class Management System - Teachers
+|--------------------------------------------------------------------------
+| Displays, searches and manages teacher records.
+|--------------------------------------------------------------------------
+*/
+
+/*
+|--------------------------------------------------------------------------
+| Authentication
+|--------------------------------------------------------------------------
+*/
+
+if (
+    !isset($_SESSION['admin']) ||
+    $_SESSION['admin'] === ''
+) {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database
+|--------------------------------------------------------------------------
+*/
+
+require_once __DIR__ . '/config.php';
+
+/*
+|--------------------------------------------------------------------------
+| CSRF Token
+|--------------------------------------------------------------------------
+*/
+
+if (
+    !isset($_SESSION['csrf_token']) ||
+    !is_string($_SESSION['csrf_token']) ||
+    $_SESSION['csrf_token'] === ''
+) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION['csrf_token'];
+
+/*
+|--------------------------------------------------------------------------
+| Admin Name
+|--------------------------------------------------------------------------
+*/
 
 $admin_name = htmlspecialchars(
-    $_SESSION['admin'],
+    (string) $_SESSION['admin'],
     ENT_QUOTES,
     'UTF-8'
 );
 
-$search = trim($_GET['search'] ?? '');
+/*
+|--------------------------------------------------------------------------
+| Search
+|--------------------------------------------------------------------------
+*/
 
-if ($search !== '') {
+$search = trim(
+    (string) ($_GET['search'] ?? '')
+);
 
-    $search_pattern = "%" . $search . "%";
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            name,
-            email,
-            phone,
-            subject
-         FROM teachers
-         WHERE
-            name LIKE ?
-            OR email LIKE ?
-            OR phone LIKE ?
-            OR subject LIKE ?
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load teacher records.");
-    }
-
-    mysqli_stmt_bind_param(
-        $stmt,
-        "ssss",
-        $search_pattern,
-        $search_pattern,
-        $search_pattern,
-        $search_pattern
-    );
-
-} else {
-
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT
-            id,
-            name,
-            email,
-            phone,
-            subject
-         FROM teachers
-         ORDER BY id DESC"
-    );
-
-    if (!$stmt) {
-        die("Unable to load teacher records.");
-    }
+if (strlen($search) > 100) {
+    $search = substr($search, 0, 100);
 }
 
-mysqli_stmt_execute($stmt);
+/*
+|--------------------------------------------------------------------------
+| Variables
+|--------------------------------------------------------------------------
+*/
 
-$result = mysqli_stmt_get_result($stmt);
+$teachers = [];
+$total_teachers = 0;
+$database_error = false;
 
-$total_teachers = mysqli_num_rows($result);
+/*
+|--------------------------------------------------------------------------
+| Flash Messages
+|--------------------------------------------------------------------------
+*/
+
+$delete_success = '';
+
+if (
+    isset($_SESSION['teacher_delete_success']) &&
+    is_string($_SESSION['teacher_delete_success'])
+) {
+    $delete_success = $_SESSION['teacher_delete_success'];
+    unset($_SESSION['teacher_delete_success']);
+}
+
+$delete_error = '';
+
+if (
+    isset($_SESSION['teacher_delete_error']) &&
+    is_string($_SESSION['teacher_delete_error'])
+) {
+    $delete_error = $_SESSION['teacher_delete_error'];
+    unset($_SESSION['teacher_delete_error']);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Fetch Teachers
+|--------------------------------------------------------------------------
+*/
+
+$stmt = null;
+
+try {
+
+    if ($search !== '') {
+
+        $search_pattern = '%' . $search . '%';
+
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                name,
+                email,
+                phone,
+                subject
+             FROM teachers
+             WHERE
+                name LIKE ?
+                OR email LIKE ?
+                OR phone LIKE ?
+                OR subject LIKE ?
+             ORDER BY id DESC'
+        );
+
+        $stmt->bind_param(
+            'ssss',
+            $search_pattern,
+            $search_pattern,
+            $search_pattern,
+            $search_pattern
+        );
+
+    } else {
+
+        $stmt = $conn->prepare(
+            'SELECT
+                id,
+                name,
+                email,
+                phone,
+                subject
+             FROM teachers
+             ORDER BY id DESC'
+        );
+    }
+
+    $stmt->execute();
+
+    /*
+    |--------------------------------------------------------------------------
+    | bind_result()
+    |--------------------------------------------------------------------------
+    | Avoids requiring mysqlnd on the hosting server.
+    |--------------------------------------------------------------------------
+    */
+
+    $stmt->bind_result(
+        $id,
+        $name,
+        $email,
+        $phone,
+        $subject
+    );
+
+    while ($stmt->fetch()) {
+
+        $teachers[] = [
+            'id' => (int) $id,
+            'name' => (string) $name,
+            'email' => (string) $email,
+            'phone' => (string) $phone,
+            'subject' => (string) $subject
+        ];
+    }
+
+    $total_teachers = count($teachers);
+
+    $stmt->close();
+    $stmt = null;
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Class Management System - Teachers query error: ' .
+        $e->getMessage()
+    );
+
+    if ($stmt instanceof mysqli_stmt) {
+        try {
+            $stmt->close();
+        } catch (Throwable $ignored) {
+            // Ignore cleanup errors.
+        }
+    }
+
+    http_response_code(500);
+
+    $database_error = true;
+}
 
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 
@@ -88,6 +229,16 @@ $total_teachers = mysqli_num_rows($result);
     <meta
         name="viewport"
         content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
+    <meta
+        name="description"
+        content="Teacher management section of the Class Management System."
     >
 
     <title>Teachers | Class Management System</title>
@@ -369,6 +520,15 @@ $total_teachers = mysqli_num_rows($result);
         }
 
         /* =========================
+           ALERTS
+        ========================= */
+
+        .alert {
+            border-radius: 10px;
+            margin-bottom: 22px;
+        }
+
+        /* =========================
            TABLE
         ========================= */
 
@@ -484,11 +644,51 @@ $total_teachers = mysqli_num_rows($result);
         .delete-btn {
             background: #fef2f2;
             color: #dc2626;
+            cursor: pointer;
         }
 
         .delete-btn:hover {
             background: #fee2e2;
             color: #b91c1c;
+        }
+
+        .delete-form {
+            display: inline;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* =========================
+           ERROR STATE
+        ========================= */
+
+        .error-state {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .error-icon {
+            width: 65px;
+            height: 65px;
+            margin: 0 auto 15px;
+            border-radius: 50%;
+            background: #fef2f2;
+            color: #dc2626;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+        }
+
+        .error-state h5 {
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        .error-state p {
+            color: #6b7280;
+            margin: 0;
+            font-size: 13px;
         }
 
         /* =========================
@@ -600,8 +800,9 @@ $total_teachers = mysqli_num_rows($result);
 
 <body>
 
-
-<!-- SIDEBAR -->
+<!-- =========================
+     SIDEBAR
+========================= -->
 
 <div class="sidebar">
 
@@ -625,90 +826,57 @@ $total_teachers = mysqli_num_rows($result);
 
     </div>
 
-
     <div class="nav-title">
         Main Menu
     </div>
 
-
     <a href="dashboard.php">
-
         <i class="bi bi-speedometer2"></i>
-
         Dashboard
-
     </a>
-
 
     <a href="students.php">
-
         <i class="bi bi-people"></i>
-
         Students
-
     </a>
-
 
     <a href="teachers.php" class="active">
-
         <i class="bi bi-person-workspace"></i>
-
         Teachers
-
     </a>
-
 
     <a href="subjects.php">
-
         <i class="bi bi-book"></i>
-
         Subjects
-
     </a>
-
 
     <a href="attendance.php">
-
         <i class="bi bi-calendar-check"></i>
-
         Attendance
-
     </a>
-
 
     <a href="marks.php">
-
         <i class="bi bi-bar-chart"></i>
-
         Marks
-
     </a>
-
 
     <a href="reports.php">
-
         <i class="bi bi-file-earmark-text"></i>
-
         Reports
-
     </a>
 
-
     <a href="logout.php" class="logout-link">
-
         <i class="bi bi-box-arrow-right"></i>
-
         Logout
-
     </a>
 
 </div>
 
-
-<!-- MAIN -->
+<!-- =========================
+     MAIN
+========================= -->
 
 <div class="main">
-
 
     <!-- TOPBAR -->
 
@@ -726,15 +894,11 @@ $total_teachers = mysqli_num_rows($result);
 
         </div>
 
-
         <div class="admin-profile">
 
             <div class="admin-icon">
-
                 <i class="bi bi-person"></i>
-
             </div>
-
 
             <div class="admin-info">
 
@@ -752,11 +916,9 @@ $total_teachers = mysqli_num_rows($result);
 
     </div>
 
-
     <!-- CONTENT -->
 
     <div class="content">
-
 
         <!-- PAGE HEADER -->
 
@@ -775,7 +937,6 @@ $total_teachers = mysqli_num_rows($result);
                     </p>
 
                 </div>
-
 
                 <div class="col-md-4 text-md-end">
 
@@ -796,6 +957,65 @@ $total_teachers = mysqli_num_rows($result);
 
         </div>
 
+        <!-- FLASH SUCCESS -->
+
+        <?php if ($delete_success !== '') { ?>
+
+            <div
+                class="alert alert-success alert-dismissible fade show"
+                role="alert"
+            >
+
+                <i class="bi bi-check-circle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $delete_success,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php } ?>
+
+        <!-- FLASH ERROR -->
+
+        <?php if ($delete_error !== '') { ?>
+
+            <div
+                class="alert alert-danger alert-dismissible fade show"
+                role="alert"
+            >
+
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+
+                <?php
+                echo htmlspecialchars(
+                    $delete_error,
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
+                ?>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="alert"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+        <?php } ?>
 
         <!-- SEARCH -->
 
@@ -804,25 +1024,33 @@ $total_teachers = mysqli_num_rows($result);
             <form
                 method="GET"
                 action="teachers.php"
+                autocomplete="off"
             >
 
-                <label class="search-label">
-
+                <label
+                    for="teacherSearch"
+                    class="search-label"
+                >
                     Search Teachers
-
                 </label>
-
 
                 <div class="input-group">
 
                     <input
-                        type="text"
+                        type="search"
+                        id="teacherSearch"
                         name="search"
                         class="form-control search-input"
                         placeholder="Search by name, email, phone or subject..."
-                        value="<?php echo htmlspecialchars($search, ENT_QUOTES, 'UTF-8'); ?>"
+                        value="<?php
+                            echo htmlspecialchars(
+                                $search,
+                                ENT_QUOTES,
+                                'UTF-8'
+                            );
+                        ?>"
+                        maxlength="100"
                     >
-
 
                     <button
                         type="submit"
@@ -834,7 +1062,6 @@ $total_teachers = mysqli_num_rows($result);
                         Search
 
                     </button>
-
 
                     <?php if ($search !== '') { ?>
 
@@ -857,11 +1084,9 @@ $total_teachers = mysqli_num_rows($result);
 
         </div>
 
-
         <!-- TABLE -->
 
         <div class="table-card">
-
 
             <div class="table-header">
 
@@ -869,43 +1094,68 @@ $total_teachers = mysqli_num_rows($result);
                     Teacher Records
                 </h5>
 
+                <?php if (!$database_error) { ?>
 
-                <div class="teacher-count">
+                    <div class="teacher-count">
 
-                    <i class="bi bi-person-workspace"></i>
+                        <i class="bi bi-person-workspace"></i>
 
-                    <?php
+                        <?php
 
-                    if ($search !== '') {
+                        if ($search !== '') {
 
-                        echo $total_teachers . " result";
+                            echo $total_teachers . ' result';
 
-                        if ($total_teachers != 1) {
-                            echo "s";
+                            if ($total_teachers !== 1) {
+                                echo 's';
+                            }
+
+                        } else {
+
+                            echo $total_teachers . ' teacher';
+
+                            if ($total_teachers !== 1) {
+                                echo 's';
+                            }
+
                         }
 
-                    } else {
+                        ?>
 
-                        echo $total_teachers . " teacher";
+                    </div>
 
-                        if ($total_teachers != 1) {
-                            echo "s";
-                        }
-
-                    }
-
-                    ?>
-
-                </div>
+                <?php } ?>
 
             </div>
 
-
             <div class="table-wrapper">
 
+                <?php if ($database_error) { ?>
 
-                <?php if ($total_teachers > 0) { ?>
+                    <!-- DATABASE ERROR -->
 
+                    <div class="error-state">
+
+                        <div class="error-icon">
+
+                            <i class="bi bi-exclamation-triangle"></i>
+
+                        </div>
+
+                        <h5>
+                            Unable to load teachers
+                        </h5>
+
+                        <p>
+                            Teacher records could not be loaded.
+                            Please try again later.
+                        </p>
+
+                    </div>
+
+                <?php } elseif ($total_teachers > 0) { ?>
+
+                    <!-- TEACHER TABLE -->
 
                     <table class="table teacher-table">
 
@@ -913,128 +1163,97 @@ $total_teachers = mysqli_num_rows($result);
 
                             <tr>
 
-                                <th>
-                                    ID
-                                </th>
-
-                                <th>
-                                    Teacher
-                                </th>
-
-                                <th>
-                                    Email
-                                </th>
-
-                                <th>
-                                    Phone
-                                </th>
-
-                                <th>
-                                    Subject
-                                </th>
-
-                                <th>
-                                    Actions
-                                </th>
+                                <th>ID</th>
+                                <th>Teacher</th>
+                                <th>Email</th>
+                                <th>Phone</th>
+                                <th>Subject</th>
+                                <th>Actions</th>
 
                             </tr>
 
                         </thead>
 
-
                         <tbody>
 
-
-                        <?php while ($row = mysqli_fetch_assoc($result)) { ?>
-
+                        <?php foreach ($teachers as $row) { ?>
 
                             <tr>
-
 
                                 <td>
 
                                     <span class="teacher-id">
 
-                                        #<?php echo (int)$row['id']; ?>
+                                        #<?php
+                                        echo (int) $row['id'];
+                                        ?>
 
                                     </span>
 
                                 </td>
-
 
                                 <td>
 
                                     <div class="teacher-name">
 
                                         <?php
-
                                         echo htmlspecialchars(
                                             $row['name'],
                                             ENT_QUOTES,
                                             'UTF-8'
                                         );
-
                                         ?>
 
                                     </div>
 
                                 </td>
 
-
                                 <td>
 
                                     <?php
-
                                     echo htmlspecialchars(
                                         $row['email'],
                                         ENT_QUOTES,
                                         'UTF-8'
                                     );
-
                                     ?>
 
                                 </td>
 
-
                                 <td>
 
                                     <?php
-
                                     echo htmlspecialchars(
                                         $row['phone'],
                                         ENT_QUOTES,
                                         'UTF-8'
                                     );
-
                                     ?>
 
                                 </td>
-
 
                                 <td>
 
                                     <span class="subject-badge">
 
                                         <?php
-
                                         echo htmlspecialchars(
                                             $row['subject'],
                                             ENT_QUOTES,
                                             'UTF-8'
                                         );
-
                                         ?>
 
                                     </span>
 
                                 </td>
 
-
                                 <td class="action-buttons">
 
+                                    <!-- EDIT -->
 
                                     <a
-                                        href="edit_teacher.php?id=<?php echo (int)$row['id']; ?>"
+                                        href="edit_teacher.php?id=<?php echo (int) $row['id']; ?>"
                                         class="action-btn edit-btn"
                                     >
 
@@ -1044,39 +1263,61 @@ $total_teachers = mysqli_num_rows($result);
 
                                     </a>
 
+                                    <!-- DELETE -->
 
-                                    <a
-                                        href="delete_teacher.php?id=<?php echo (int)$row['id']; ?>"
-                                        class="action-btn delete-btn"
-                                        onclick="return confirm('Are you sure you want to delete this teacher?');"
+                                    <form
+                                        method="POST"
+                                        action="delete_teacher.php"
+                                        class="delete-form"
+                                        onsubmit="return confirm('Are you sure you want to delete this teacher?');"
                                     >
 
-                                        <i class="bi bi-trash"></i>
+                                        <input
+                                            type="hidden"
+                                            name="id"
+                                            value="<?php echo (int) $row['id']; ?>"
+                                        >
 
-                                        Delete
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php
+                                                echo htmlspecialchars(
+                                                    $csrf_token,
+                                                    ENT_QUOTES,
+                                                    'UTF-8'
+                                                );
+                                            ?>"
+                                        >
 
-                                    </a>
+                                        <button
+                                            type="submit"
+                                            class="action-btn delete-btn"
+                                        >
 
+                                            <i class="bi bi-trash"></i>
+
+                                            Delete
+
+                                        </button>
+
+                                    </form>
 
                                 </td>
 
-
                             </tr>
 
-
                         <?php } ?>
-
 
                         </tbody>
 
                     </table>
 
-
                 <?php } else { ?>
 
+                    <!-- EMPTY STATE -->
 
                     <div class="empty-state">
-
 
                         <div class="empty-icon">
 
@@ -1084,9 +1325,7 @@ $total_teachers = mysqli_num_rows($result);
 
                         </div>
 
-
                         <?php if ($search !== '') { ?>
-
 
                             <h5>
                                 No teachers found
@@ -1096,20 +1335,16 @@ $total_teachers = mysqli_num_rows($result);
 
                                 No teacher records match
                                 "<?php
-
                                 echo htmlspecialchars(
                                     $search,
                                     ENT_QUOTES,
                                     'UTF-8'
                                 );
-
                                 ?>".
 
                             </p>
 
-
                         <?php } else { ?>
-
 
                             <h5>
                                 No teachers yet
@@ -1119,43 +1354,33 @@ $total_teachers = mysqli_num_rows($result);
                                 Start by adding your first teacher.
                             </p>
 
-
                         <?php } ?>
-
 
                     </div>
 
-
                 <?php } ?>
-
 
             </div>
 
         </div>
 
-
         <!-- FOOTER -->
 
         <footer>
 
-            © 2026 Class Management System.
+            © <?php echo date('Y'); ?>
+            Class Management System.
             All Rights Reserved.
 
         </footer>
-
 
     </div>
 
 </div>
 
-
-<?php
-
-if (isset($stmt) && $stmt) {
-    mysqli_stmt_close($stmt);
-}
-
-?>
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+></script>
 
 </body>
 

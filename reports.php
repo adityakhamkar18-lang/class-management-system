@@ -1,111 +1,241 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
-if (!isset($_SESSION['admin'])) {
-    header("Location: login.php");
-    exit();
+/*
+|--------------------------------------------------------------------------
+| Admin Authentication
+|--------------------------------------------------------------------------
+*/
+if (!isset($_SESSION['admin']) || $_SESSION['admin'] === '') {
+    header('Location: login.php');
+    exit;
 }
 
-require_once "config.php";
+/*
+|--------------------------------------------------------------------------
+| Database
+|--------------------------------------------------------------------------
+*/
+require_once __DIR__ . '/config.php';
 
-// ----------------------------------------------------
-// Admin name
-// ----------------------------------------------------
-$admin_name = $_SESSION['admin'] ?? 'Administrator';
-
-// ----------------------------------------------------
-// Function: Get Table Count
-// ----------------------------------------------------
-function getCount($conn, $table)
+/*
+|--------------------------------------------------------------------------
+| Helper
+|--------------------------------------------------------------------------
+*/
+function e(?string $value): string
 {
-    $allowed_tables = [
-        'students',
-        'attendance',
-        'marks'
-    ];
+    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+}
 
-    if (!in_array($table, $allowed_tables, true)) {
-        return 0;
-    }
+/*
+|--------------------------------------------------------------------------
+| Dashboard Statistics
+|--------------------------------------------------------------------------
+*/
+$total_students = 0;
+$total_teachers = 0;
+$total_subjects = 0;
+$total_marks = 0;
+$total_attendance = 0;
+$total_present = 0;
+$total_absent = 0;
 
-    $stmt = mysqli_prepare(
-        $conn,
-        "SELECT COUNT(*) AS total FROM $table"
+try {
+
+    /*
+    |--------------------------------------------------------------------------
+    | Students
+    |--------------------------------------------------------------------------
+    */
+    $stmt = $conn->prepare('SELECT COUNT(*) FROM students');
+    $stmt->execute();
+    $stmt->bind_result($total_students);
+    $stmt->fetch();
+    $stmt->close();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Teachers
+    |--------------------------------------------------------------------------
+    */
+    $stmt = $conn->prepare('SELECT COUNT(*) FROM teachers');
+    $stmt->execute();
+    $stmt->bind_result($total_teachers);
+    $stmt->fetch();
+    $stmt->close();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Subjects
+    |--------------------------------------------------------------------------
+    */
+    $stmt = $conn->prepare('SELECT COUNT(*) FROM subjects');
+    $stmt->execute();
+    $stmt->bind_result($total_subjects);
+    $stmt->fetch();
+    $stmt->close();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Marks
+    |--------------------------------------------------------------------------
+    */
+    $stmt = $conn->prepare('SELECT COUNT(*) FROM marks');
+    $stmt->execute();
+    $stmt->bind_result($total_marks);
+    $stmt->fetch();
+    $stmt->close();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Attendance
+    |--------------------------------------------------------------------------
+    */
+    $stmt = $conn->prepare(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(status = 'Present'), 0),
+            COALESCE(SUM(status = 'Absent'), 0)
+         FROM attendance"
     );
 
-    if (!$stmt) {
-        return 0;
-    }
+    $stmt->execute();
 
-    if (!mysqli_stmt_execute($stmt)) {
-        mysqli_stmt_close($stmt);
-        return 0;
-    }
+    $stmt->bind_result(
+        $total_attendance,
+        $total_present,
+        $total_absent
+    );
 
-    $result = mysqli_stmt_get_result($stmt);
-    $data = mysqli_fetch_assoc($result);
+    $stmt->fetch();
+    $stmt->close();
 
-    mysqli_stmt_close($stmt);
+} catch (mysqli_sql_exception $e) {
 
-    return (int)($data['total'] ?? 0);
+    error_log(
+        'Reports statistics error: ' . $e->getMessage()
+    );
+
+    $total_students = 0;
+    $total_teachers = 0;
+    $total_subjects = 0;
+    $total_marks = 0;
+    $total_attendance = 0;
+    $total_present = 0;
+    $total_absent = 0;
 }
 
-// ----------------------------------------------------
-// Get Statistics
-// ----------------------------------------------------
-$total_students = getCount($conn, 'students');
-$total_attendance = getCount($conn, 'attendance');
-$total_marks = getCount($conn, 'marks');
+/*
+|--------------------------------------------------------------------------
+| Attendance Percentage
+|--------------------------------------------------------------------------
+*/
+$attendance_percentage = $total_attendance > 0
+    ? round(($total_present / $total_attendance) * 100, 2)
+    : 0;
 
-// ----------------------------------------------------
-// Attendance Summary
-// ----------------------------------------------------
-$present_count = 0;
-$absent_count = 0;
+/*
+|--------------------------------------------------------------------------
+| Student Performance
+|--------------------------------------------------------------------------
+*/
+$students = [];
 
-$attendance_stmt = mysqli_prepare(
-    $conn,
-    "SELECT status FROM attendance"
-);
+try {
 
-if ($attendance_stmt) {
+    $stmt = $conn->prepare(
+        "SELECT
+            s.id,
+            s.roll_no,
+            s.name,
+            s.class_name,
+            COALESCE(AVG(m.marks), 0) AS average_marks,
+            COUNT(m.id) AS subject_count
+         FROM students s
+         LEFT JOIN marks m
+            ON m.student_id = s.id
+         GROUP BY
+            s.id,
+            s.roll_no,
+            s.name,
+            s.class_name
+         ORDER BY s.name ASC"
+    );
 
-    if (mysqli_stmt_execute($attendance_stmt)) {
+    $stmt->execute();
 
-        $attendance_result = mysqli_stmt_get_result($attendance_stmt);
+    $stmt->bind_result(
+        $student_id,
+        $roll_no,
+        $student_name,
+        $class_name,
+        $average_marks,
+        $subject_count
+    );
 
-        while ($attendance_row = mysqli_fetch_assoc($attendance_result)) {
+    while ($stmt->fetch()) {
 
-            $status = strtolower(
-                trim($attendance_row['status'] ?? '')
-            );
-
-            if ($status === 'present') {
-                $present_count++;
-            } elseif ($status === 'absent') {
-                $absent_count++;
-            }
-        }
+        $students[] = [
+            'id' => (int) $student_id,
+            'roll_no' => (string) $roll_no,
+            'name' => (string) $student_name,
+            'class_name' => (string) ($class_name ?? ''),
+            'average_marks' => (float) $average_marks,
+            'subject_count' => (int) $subject_count
+        ];
     }
 
-    mysqli_stmt_close($attendance_stmt);
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Student performance report error: ' . $e->getMessage()
+    );
 }
 
-$total_attendance_days = $present_count + $absent_count;
+/*
+|--------------------------------------------------------------------------
+| Overall Marks Statistics
+|--------------------------------------------------------------------------
+*/
+$average_marks = 0;
+$highest_marks = 0;
+$lowest_marks = 0;
 
-$attendance_percentage = 0;
+try {
 
-if ($total_attendance_days > 0) {
+    $stmt = $conn->prepare(
+        'SELECT
+            COALESCE(AVG(marks), 0),
+            COALESCE(MAX(marks), 0),
+            COALESCE(MIN(marks), 0)
+         FROM marks'
+    );
 
-    $attendance_percentage = round(
-        ($present_count / $total_attendance_days) * 100,
-        2
+    $stmt->execute();
+
+    $stmt->bind_result(
+        $average_marks,
+        $highest_marks,
+        $lowest_marks
+    );
+
+    $stmt->fetch();
+    $stmt->close();
+
+} catch (mysqli_sql_exception $e) {
+
+    error_log(
+        'Marks summary error: ' . $e->getMessage()
     );
 }
 
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 
@@ -118,15 +248,18 @@ if ($total_attendance_days > 0) {
         content="width=device-width, initial-scale=1.0"
     >
 
+    <meta
+        name="robots"
+        content="noindex, nofollow"
+    >
+
     <title>Reports | Class Management System</title>
 
-    <!-- Bootstrap -->
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
         rel="stylesheet"
     >
 
-    <!-- Bootstrap Icons -->
     <link
         href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
         rel="stylesheet"
@@ -134,547 +267,145 @@ if ($total_attendance_days > 0) {
 
     <style>
 
-        * {
-            box-sizing: border-box;
-        }
-
         body {
-            margin: 0;
             background: #f4f6f9;
-            font-family: Arial, Helvetica, sans-serif;
-            color: #212529;
+            font-family: Arial, sans-serif;
+            margin: 0;
         }
-
-        /* =========================================
-           SIDEBAR
-        ========================================= */
 
         .sidebar {
+            width: 240px;
+            min-height: 100vh;
+            background: #212529;
             position: fixed;
-            top: 0;
             left: 0;
-            width: 250px;
-            height: 100vh;
-            background: #111827;
-            padding: 22px 15px;
-            overflow-y: auto;
+            top: 0;
+            padding: 20px 15px;
             z-index: 1000;
         }
 
-        .sidebar-brand {
-            color: #ffffff;
-            font-size: 21px;
-            font-weight: 700;
+        .sidebar .logo {
+            width: 55px;
+            height: 55px;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto 10px;
+        }
+
+        .sidebar h4 {
+            color: #fff;
             text-align: center;
-            padding: 12px 5px 25px;
-            border-bottom: 1px solid rgba(255,255,255,0.10);
-            margin-bottom: 20px;
+            margin-bottom: 25px;
+            font-size: 19px;
         }
 
-        .sidebar-brand i {
-            margin-right: 8px;
-        }
-
-        .sidebar-menu {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-
-        .sidebar-menu li {
-            margin-bottom: 7px;
-        }
-
-        .sidebar-menu a {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            color: #cbd5e1;
-            text-decoration: none;
-            padding: 12px 14px;
-            border-radius: 9px;
-            font-size: 15px;
-            transition: 0.2s ease;
-        }
-
-        .sidebar-menu a:hover {
-            background: #1f2937;
-            color: #ffffff;
-        }
-
-        .sidebar-menu a.active {
-            background: #2563eb;
-            color: #ffffff;
-            font-weight: 600;
-        }
-
-        .sidebar-menu i {
-            width: 20px;
-            font-size: 17px;
-        }
-
-        /* =========================================
-           MAIN CONTENT
-        ========================================= */
-
-        .main-content {
-            margin-left: 250px;
-            min-height: 100vh;
-        }
-
-        /* =========================================
-           TOPBAR
-        ========================================= */
-
-        .topbar {
-            height: 70px;
-            background: #ffffff;
-            border-bottom: 1px solid #e5e7eb;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0 30px;
-        }
-
-        .topbar-title {
-            font-size: 20px;
-            font-weight: 700;
-            color: #111827;
-        }
-
-        .admin-profile {
+        .sidebar a {
             display: flex;
             align-items: center;
             gap: 10px;
-            color: #374151;
-            font-weight: 600;
+            color: #ced4da;
+            text-decoration: none;
+            padding: 11px 12px;
+            border-radius: 8px;
+            margin-bottom: 5px;
+            transition: 0.2s ease;
         }
 
-        .admin-icon {
-            width: 38px;
-            height: 38px;
-            border-radius: 50%;
-            background: #2563eb;
-            color: #ffffff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+        .sidebar a:hover,
+        .sidebar a.active {
+            background: #343a40;
+            color: #fff;
         }
 
-        /* =========================================
-           CONTENT
-        ========================================= */
+        .sidebar a i {
+            width: 20px;
+        }
 
-        .content-area {
+        .main {
+            margin-left: 240px;
             padding: 30px;
         }
 
         .page-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 15px;
+            background: #fff;
+            border-radius: 12px;
+            padding: 22px 25px;
             margin-bottom: 25px;
-            flex-wrap: wrap;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
         }
 
-        .page-title {
+        .page-header h2 {
             margin: 0;
-            font-size: 28px;
             font-weight: 700;
-            color: #111827;
         }
 
-        .page-subtitle {
-            margin-top: 6px;
-            margin-bottom: 0;
-            color: #6b7280;
-            font-size: 14px;
+        .page-header p {
+            margin: 5px 0 0;
+            color: #6c757d;
         }
-
-        /* =========================================
-           STAT CARDS
-        ========================================= */
 
         .stat-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
+            background: #fff;
+            border-radius: 12px;
             padding: 20px;
-            height: 100%;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.05);
-            transition: 0.2s ease;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 7px 18px rgba(0,0,0,0.07);
-        }
-
-        .stat-icon {
-            width: 45px;
-            height: 45px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #eff6ff;
-            color: #2563eb;
-            font-size: 20px;
-            margin-bottom: 15px;
-        }
-
-        .stat-label {
-            color: #6b7280;
-            font-size: 13px;
-            margin-bottom: 5px;
-        }
-
-        .stat-value {
-            color: #111827;
-            font-size: 25px;
-            font-weight: 700;
-        }
-
-        /* =========================================
-           SECTION TITLE
-        ========================================= */
-
-        .section-title {
-            font-size: 20px;
-            font-weight: 700;
-            color: #111827;
-            margin-top: 35px;
-            margin-bottom: 18px;
-        }
-
-        /* =========================================
-           ATTENDANCE SUMMARY
-        ========================================= */
-
-        .summary-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            padding: 22px;
-            margin-top: 25px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.05);
-        }
-
-        .summary-item {
-            padding: 16px;
-            border-radius: 10px;
-            background: #f8fafc;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
             height: 100%;
         }
 
-        .summary-label {
-            color: #6b7280;
-            font-size: 13px;
-            margin-bottom: 5px;
+        .stat-card i {
+            font-size: 28px;
         }
 
-        .summary-value {
-            color: #111827;
-            font-size: 22px;
+        .stat-card h3 {
+            margin: 10px 0 0;
             font-weight: 700;
         }
 
-        /* =========================================
-           DIFFERENT REPORT CARDS
-        ========================================= */
+        .stat-card p {
+            margin: 3px 0 0;
+            color: #6c757d;
+        }
 
-        .performance-report-card,
-        .attendance-report-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 16px;
+        .report-box {
+            background: #fff;
+            border-radius: 12px;
             padding: 25px;
-            height: 100%;
-            transition: 0.25s ease;
+            margin-top: 25px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
         }
 
-        /* Student Performance */
-
-        .performance-report-card {
-            border-top: 4px solid #2563eb;
+        .table-responsive {
+            border-radius: 8px;
         }
 
-        .performance-report-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 10px 25px rgba(37,99,235,0.12);
+        table {
+            margin-bottom: 0 !important;
         }
 
-        /* Attendance */
-
-        .attendance-report-card {
-            border-top: 4px solid #16a34a;
+        .badge-average {
+            font-size: 13px;
         }
-
-        .attendance-report-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 10px 25px rgba(22,163,74,0.12);
-        }
-
-        /* =========================================
-           REPORT HEADERS
-        ========================================= */
-
-        .performance-header,
-        .attendance-header {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
-        .performance-icon,
-        .attendance-icon {
-            width: 60px;
-            height: 60px;
-            border-radius: 14px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 26px;
-        }
-
-        .performance-icon {
-            background: #eff6ff;
-            color: #2563eb;
-        }
-
-        .attendance-icon {
-            background: #f0fdf4;
-            color: #16a34a;
-        }
-
-        /* =========================================
-           REPORT CATEGORY
-        ========================================= */
-
-        .report-category {
-            display: block;
-            color: #2563eb;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 1px;
-            margin-bottom: 4px;
-        }
-
-        .attendance-category {
-            color: #16a34a;
-        }
-
-        .performance-report-card h4,
-        .attendance-report-card h4 {
-            margin: 0;
-            font-size: 20px;
-            font-weight: 700;
-            color: #111827;
-        }
-
-        /* =========================================
-           DIVIDER
-        ========================================= */
-
-        .performance-divider,
-        .attendance-divider {
-            height: 1px;
-            margin: 20px 0;
-        }
-
-        .performance-divider {
-            background: #dbeafe;
-        }
-
-        .attendance-divider {
-            background: #dcfce7;
-        }
-
-        /* =========================================
-           REPORT DESCRIPTION
-        ========================================= */
-
-        .report-description {
-            color: #6b7280;
-            font-size: 14px;
-            line-height: 1.7;
-            min-height: 72px;
-            margin-bottom: 0;
-        }
-
-        /* =========================================
-           REPORT FEATURES
-        ========================================= */
-
-        .report-features {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin: 20px 0 22px;
-        }
-
-        .report-features span {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 7px 10px;
-            border-radius: 7px;
-            background: #eff6ff;
-            color: #1d4ed8;
-            font-size: 12px;
-            font-weight: 600;
-        }
-
-        .report-features span i {
-            font-size: 12px;
-        }
-
-        .attendance-features span {
-            background: #f0fdf4;
-            color: #15803d;
-        }
-
-        /* =========================================
-           REPORT BUTTONS
-        ========================================= */
-
-        .performance-button,
-        .attendance-button {
-            display: flex;
-            align-items: center;
-            gap: 9px;
-            width: 100%;
-            padding: 12px 15px;
-            border-radius: 9px;
-            color: #ffffff;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 600;
-            transition: 0.2s ease;
-        }
-
-        .performance-button {
-            background: #2563eb;
-        }
-
-        .performance-button:hover {
-            background: #1d4ed8;
-            color: #ffffff;
-        }
-
-        .attendance-button {
-            background: #16a34a;
-        }
-
-        .attendance-button:hover {
-            background: #15803d;
-            color: #ffffff;
-        }
-
-        /* =========================================
-           QUICK NAVIGATION
-        ========================================= */
 
         .quick-link {
-            display: flex;
-            align-items: center;
-            gap: 10px;
             text-decoration: none;
-            padding: 13px 15px;
-            border: 1px solid #e5e7eb;
-            border-radius: 9px;
-            color: #374151;
-            background: #ffffff;
-            transition: 0.2s ease;
         }
 
-        .quick-link:hover {
-            background: #f8fafc;
-            color: #2563eb;
-            border-color: #bfdbfe;
-        }
-
-        /* =========================================
-           FOOTER
-        ========================================= */
-
-        .footer {
-            text-align: center;
-            color: #6b7280;
-            font-size: 13px;
-            padding: 25px 10px;
-        }
-
-        /* =========================================
-           RESPONSIVE
-        ========================================= */
-
-        @media (max-width: 992px) {
+        @media (max-width: 768px) {
 
             .sidebar {
                 position: relative;
                 width: 100%;
-                height: auto;
-            }
-
-            .main-content {
-                margin-left: 0;
-            }
-
-            .sidebar-menu {
-                display: grid;
-                grid-template-columns: repeat(2, 1fr);
-                gap: 5px;
-            }
-
-            .sidebar-menu li {
-                margin-bottom: 0;
-            }
-
-            .topbar {
-                padding: 0 20px;
-            }
-
-            .content-area {
-                padding: 20px;
-            }
-        }
-
-        @media (max-width: 576px) {
-
-            .sidebar-menu {
-                grid-template-columns: 1fr;
-            }
-
-            .topbar {
-                height: auto;
-                padding: 15px;
-                gap: 10px;
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            .content-area {
-                padding: 15px;
-            }
-
-            .page-title {
-                font-size: 23px;
-            }
-
-            .performance-report-card,
-            .attendance-report-card {
-                padding: 20px;
-            }
-
-            .report-description {
                 min-height: auto;
             }
 
-            .performance-header,
-            .attendance-header {
-                align-items: flex-start;
+            .main {
+                margin-left: 0;
+                padding: 15px;
+            }
+
+            .sidebar a {
+                display: inline-flex;
+                margin-right: 4px;
             }
         }
 
@@ -684,544 +415,556 @@ if ($total_attendance_days > 0) {
 
 <body>
 
-<!-- =========================================
+<!-- =========================================================
      SIDEBAR
-========================================= -->
+========================================================= -->
 
 <aside class="sidebar">
 
-    <div class="sidebar-brand">
-        <i class="bi bi-mortarboard-fill"></i>
-        Class Management
-    </div>
+    <img
+        src="images/logo.png"
+        alt="Class Management System"
+        class="logo"
+    >
 
-    <ul class="sidebar-menu">
+    <h4>Class Management</h4>
 
-        <li>
-            <a href="dashboard.php">
-                <i class="bi bi-speedometer2"></i>
-                Dashboard
-            </a>
-        </li>
+    <a href="dashboard.php">
+        <i class="bi bi-speedometer2"></i>
+        Dashboard
+    </a>
 
-        <li>
-            <a href="students.php">
-                <i class="bi bi-people-fill"></i>
-                Students
-            </a>
-        </li>
+    <a href="students.php">
+        <i class="bi bi-people"></i>
+        Students
+    </a>
 
-        <li>
-            <a href="teachers.php">
-                <i class="bi bi-person-workspace"></i>
-                Teachers
-            </a>
-        </li>
+    <a href="teachers.php">
+        <i class="bi bi-person-badge"></i>
+        Teachers
+    </a>
 
-        <li>
-            <a href="subjects.php">
-                <i class="bi bi-book-fill"></i>
-                Subjects
-            </a>
-        </li>
+    <a href="subjects.php">
+        <i class="bi bi-book"></i>
+        Subjects
+    </a>
 
-        <li>
-            <a href="attendance.php">
-                <i class="bi bi-calendar-check-fill"></i>
-                Attendance
-            </a>
-        </li>
+    <a href="attendance.php">
+        <i class="bi bi-calendar-check"></i>
+        Attendance
+    </a>
 
-        <li>
-            <a href="marks.php">
-                <i class="bi bi-bar-chart-fill"></i>
-                Marks
-            </a>
-        </li>
+    <a href="marks.php">
+        <i class="bi bi-bar-chart"></i>
+        Marks
+    </a>
 
-        <li>
-            <a href="reports.php" class="active">
-                <i class="bi bi-file-earmark-text-fill"></i>
-                Reports
-            </a>
-        </li>
+    <a href="reports.php" class="active">
+        <i class="bi bi-file-earmark-bar-graph"></i>
+        Reports
+    </a>
 
-        <li>
-            <a href="logout.php">
-                <i class="bi bi-box-arrow-right"></i>
-                Logout
-            </a>
-        </li>
-
-    </ul>
+    <a href="logout.php">
+        <i class="bi bi-box-arrow-right"></i>
+        Logout
+    </a>
 
 </aside>
 
 
-<!-- =========================================
+<!-- =========================================================
      MAIN CONTENT
-========================================= -->
+========================================================= -->
 
-<div class="main-content">
+<main class="main">
 
-    <!-- TOPBAR -->
+    <div class="page-header">
 
-    <div class="topbar">
+        <h2>
+            <i class="bi bi-file-earmark-bar-graph"></i>
+            Academic Reports
+        </h2>
 
-        <div class="topbar-title">
-            Reports
-        </div>
+        <p>
+            View an overview of students, marks and attendance.
+        </p>
 
-        <div class="admin-profile">
+    </div>
 
-            <div class="admin-icon">
-                <i class="bi bi-person-fill"></i>
+
+    <!-- =====================================================
+         STATISTICS
+    ====================================================== -->
+
+    <div class="row g-4">
+
+        <div class="col-md-6 col-xl-3">
+
+            <div class="stat-card">
+
+                <i class="bi bi-people"></i>
+
+                <h3>
+                    <?= $total_students ?>
+                </h3>
+
+                <p>
+                    Total Students
+                </p>
+
             </div>
 
-            <span>
-                <?php echo htmlspecialchars($admin_name); ?>
-            </span>
+        </div>
+
+
+        <div class="col-md-6 col-xl-3">
+
+            <div class="stat-card">
+
+                <i class="bi bi-person-badge"></i>
+
+                <h3>
+                    <?= $total_teachers ?>
+                </h3>
+
+                <p>
+                    Total Teachers
+                </p>
+
+            </div>
+
+        </div>
+
+
+        <div class="col-md-6 col-xl-3">
+
+            <div class="stat-card">
+
+                <i class="bi bi-book"></i>
+
+                <h3>
+                    <?= $total_subjects ?>
+                </h3>
+
+                <p>
+                    Total Subjects
+                </p>
+
+            </div>
+
+        </div>
+
+
+        <div class="col-md-6 col-xl-3">
+
+            <div class="stat-card">
+
+                <i class="bi bi-pencil-square"></i>
+
+                <h3>
+                    <?= $total_marks ?>
+                </h3>
+
+                <p>
+                    Marks Records
+                </p>
+
+            </div>
 
         </div>
 
     </div>
 
 
-    <!-- CONTENT -->
+    <!-- =====================================================
+         ATTENDANCE + MARKS SUMMARY
+    ====================================================== -->
 
-    <main class="content-area">
+    <div class="row g-4 mt-1">
 
-        <!-- PAGE HEADER -->
+        <div class="col-lg-6">
 
-        <div class="page-header">
+            <div class="report-box">
+
+                <h4 class="mb-4">
+                    <i class="bi bi-calendar-check"></i>
+                    Attendance Summary
+                </h4>
+
+                <div class="row g-3">
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= $total_attendance ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Total
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= $total_present ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Present
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= $total_absent ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Absent
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <hr>
+
+                <div class="text-center">
+
+                    <h3>
+                        <?= e((string) $attendance_percentage) ?>%
+                    </h3>
+
+                    <p class="text-muted mb-3">
+                        Overall Attendance
+                    </p>
+
+                    <a
+                        href="attendance_report.php"
+                        class="btn btn-primary"
+                    >
+                        <i class="bi bi-file-earmark-text"></i>
+                        Attendance Report
+                    </a>
+
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="col-lg-6">
+
+            <div class="report-box">
+
+                <h4 class="mb-4">
+                    <i class="bi bi-bar-chart"></i>
+                    Marks Summary
+                </h4>
+
+                <div class="row g-3">
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= number_format((float) $average_marks, 2) ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Average
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= (int) $highest_marks ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Highest
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                    <div class="col-4">
+
+                        <div class="text-center">
+
+                            <h3>
+                                <?= (int) $lowest_marks ?>
+                            </h3>
+
+                            <small class="text-muted">
+                                Lowest
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <hr>
+
+                <div class="text-center">
+
+                    <p class="text-muted">
+                        View individual student performance below.
+                    </p>
+
+                    <a
+                        href="marks.php"
+                        class="btn btn-primary"
+                    >
+                        <i class="bi bi-bar-chart-line"></i>
+                        Manage Marks
+                    </a>
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         STUDENT PERFORMANCE
+    ====================================================== -->
+
+    <div class="report-box">
+
+        <div
+            class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-4"
+        >
 
             <div>
 
-                <h1 class="page-title">
-                    Reports
-                </h1>
+                <h4 class="mb-1">
+                    <i class="bi bi-mortarboard"></i>
+                    Student Performance
+                </h4>
 
-                <p class="page-subtitle">
-                    View student performance and attendance reports.
+                <p class="text-muted mb-0">
+                    Academic performance based on recorded marks.
                 </p>
 
             </div>
 
             <a
-                href="dashboard.php"
-                class="btn btn-outline-secondary"
+                href="students.php"
+                class="btn btn-outline-primary"
             >
-                <i class="bi bi-speedometer2"></i>
-                Dashboard
+                <i class="bi bi-people"></i>
+                Students
             </a>
 
         </div>
 
 
-        <!-- =====================================
-             STATISTICS
-        ====================================== -->
+        <div class="table-responsive">
 
-        <div class="row g-3">
+            <table class="table table-hover align-middle">
 
-            <div class="col-lg-4 col-md-6">
+                <thead class="table-dark">
 
-                <div class="stat-card">
+                    <tr>
 
-                    <div class="stat-icon">
-                        <i class="bi bi-people-fill"></i>
-                    </div>
+                        <th>#</th>
 
-                    <div class="stat-label">
-                        Total Students
-                    </div>
+                        <th>Roll No.</th>
 
-                    <div class="stat-value">
-                        <?php echo $total_students; ?>
-                    </div>
+                        <th>Student Name</th>
 
-                </div>
+                        <th>Class</th>
 
-            </div>
+                        <th>Subjects</th>
 
+                        <th>Average Marks</th>
 
-            <div class="col-lg-4 col-md-6">
+                        <th>Report</th>
 
-                <div class="stat-card">
+                    </tr>
 
-                    <div class="stat-icon">
-                        <i class="bi bi-calendar-check-fill"></i>
-                    </div>
+                </thead>
 
-                    <div class="stat-label">
-                        Attendance Records
-                    </div>
+                <tbody>
 
-                    <div class="stat-value">
-                        <?php echo $total_attendance; ?>
-                    </div>
+                <?php if (empty($students)): ?>
 
-                </div>
+                    <tr>
 
-            </div>
+                        <td
+                            colspan="7"
+                            class="text-center text-muted py-4"
+                        >
+                            No student records found.
+                        </td>
 
+                    </tr>
 
-            <div class="col-lg-4 col-md-6">
+                <?php else: ?>
 
-                <div class="stat-card">
+                    <?php foreach ($students as $index => $student): ?>
 
-                    <div class="stat-icon">
-                        <i class="bi bi-bar-chart-fill"></i>
-                    </div>
+                        <tr>
 
-                    <div class="stat-label">
-                        Marks Records
-                    </div>
+                            <td>
+                                <?= $index + 1 ?>
+                            </td>
 
-                    <div class="stat-value">
-                        <?php echo $total_marks; ?>
-                    </div>
+                            <td>
+                                <?= e($student['roll_no']) ?>
+                            </td>
 
-                </div>
+                            <td>
+                                <strong>
+                                    <?= e($student['name']) ?>
+                                </strong>
+                            </td>
 
-            </div>
+                            <td>
+                                <?= e($student['class_name']) ?: '-' ?>
+                            </td>
 
-        </div>
+                            <td>
+                                <?= $student['subject_count'] ?>
+                            </td>
 
+                            <td>
 
-        <!-- =====================================
-             ATTENDANCE SUMMARY
-        ====================================== -->
+                                <span class="badge text-bg-primary badge-average">
 
-        <div class="summary-card">
+                                    <?= number_format(
+                                        $student['average_marks'],
+                                        2
+                                    ) ?>
 
-            <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                                </span>
 
-                <div>
+                            </td>
 
-                    <h3 class="mb-1 fw-bold">
-                        Attendance Summary
-                    </h3>
+                            <td>
 
-                    <p class="text-muted mb-0 small">
-                        Overall attendance information
-                    </p>
+                                <a
+                                    href="student_report.php?student_id=<?= $student['id'] ?>"
+                                    class="btn btn-sm btn-outline-primary"
+                                >
+                                    <i class="bi bi-eye"></i>
+                                    View
+                                </a>
 
-                </div>
+                            </td>
 
-                <i class="bi bi-pie-chart-fill text-primary fs-3"></i>
+                        </tr>
 
-            </div>
+                    <?php endforeach; ?>
 
+                <?php endif; ?>
 
-            <div class="row g-3">
+                </tbody>
 
-                <div class="col-md-4">
-
-                    <div class="summary-item">
-
-                        <div class="summary-label">
-                            Present
-                        </div>
-
-                        <div class="summary-value text-success">
-                            <?php echo $present_count; ?>
-                        </div>
-
-                    </div>
-
-                </div>
-
-
-                <div class="col-md-4">
-
-                    <div class="summary-item">
-
-                        <div class="summary-label">
-                            Absent
-                        </div>
-
-                        <div class="summary-value text-danger">
-                            <?php echo $absent_count; ?>
-                        </div>
-
-                    </div>
-
-                </div>
-
-
-                <div class="col-md-4">
-
-                    <div class="summary-item">
-
-                        <div class="summary-label">
-                            Attendance Percentage
-                        </div>
-
-                        <div class="summary-value text-primary">
-                            <?php echo $attendance_percentage; ?>%
-                        </div>
-
-                    </div>
-
-                </div>
-
-            </div>
+            </table>
 
         </div>
 
+    </div>
 
-        <!-- =====================================
-             AVAILABLE REPORTS
-        ====================================== -->
 
-        <h2 class="section-title">
-            Available Reports
-        </h2>
+    <!-- =====================================================
+         QUICK LINKS
+    ====================================================== -->
 
+    <div class="report-box">
 
-        <div class="row g-4">
-
-
-            <!-- =================================
-                 STUDENT PERFORMANCE REPORT
-            ================================== -->
-
-            <div class="col-lg-6">
-
-                <div class="performance-report-card">
-
-                    <div class="performance-header">
-
-                        <div class="performance-icon">
-                            <i class="bi bi-mortarboard-fill"></i>
-                        </div>
-
-                        <div>
-
-                            <span class="report-category">
-                                ACADEMIC
-                            </span>
-
-                            <h4>
-                                Student Performance
-                            </h4>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="performance-divider"></div>
-
-
-                    <p class="report-description">
-
-                        Analyze student academic performance including
-                        subject-wise marks, total marks, percentage
-                        and final result.
-
-                    </p>
-
-
-                    <div class="report-features">
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Subject Marks
-                        </span>
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Percentage
-                        </span>
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Result
-                        </span>
-
-                    </div>
-
-
-                    <a
-                        href="student_report.php"
-                        class="performance-button"
-                    >
-
-                        <i class="bi bi-bar-chart-line-fill"></i>
-
-                        View Performance
-
-                        <i class="bi bi-arrow-right ms-auto"></i>
-
-                    </a>
-
-                </div>
-
-            </div>
-
-
-            <!-- =================================
-                 ATTENDANCE REPORT
-            ================================== -->
-
-            <div class="col-lg-6">
-
-                <div class="attendance-report-card">
-
-                    <div class="attendance-header">
-
-                        <div class="attendance-icon">
-                            <i class="bi bi-calendar2-week-fill"></i>
-                        </div>
-
-                        <div>
-
-                            <span class="report-category attendance-category">
-                                ATTENDANCE
-                            </span>
-
-                            <h4>
-                                Attendance Report
-                            </h4>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="attendance-divider"></div>
-
-
-                    <p class="report-description">
-
-                        Monitor student attendance including present
-                        days, absent days and overall attendance
-                        percentage.
-
-                    </p>
-
-
-                    <div class="report-features attendance-features">
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Present Days
-                        </span>
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Absent Days
-                        </span>
-
-                        <span>
-                            <i class="bi bi-check-circle-fill"></i>
-                            Attendance %
-                        </span>
-
-                    </div>
-
-
-                    <a
-                        href="attendance_report.php"
-                        class="attendance-button"
-                    >
-
-                        <i class="bi bi-calendar-check-fill"></i>
-
-                        View Attendance
-
-                        <i class="bi bi-arrow-right ms-auto"></i>
-
-                    </a>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =====================================
-             QUICK NAVIGATION
-        ====================================== -->
-
-        <h2 class="section-title">
-            Quick Navigation
-        </h2>
-
+        <h4 class="mb-4">
+            <i class="bi bi-lightning"></i>
+            Quick Reports
+        </h4>
 
         <div class="row g-3">
 
             <div class="col-md-4">
 
                 <a
-                    href="students.php"
-                    class="quick-link"
+                    href="attendance_report.php"
+                    class="btn btn-outline-primary w-100 py-3 quick-link"
                 >
-
-                    <i class="bi bi-people-fill text-primary"></i>
-
-                    Manage Students
-
-                    <i class="bi bi-arrow-right ms-auto"></i>
-
+                    <i class="bi bi-calendar-check"></i>
+                    Attendance Report
                 </a>
 
             </div>
-
-
-            <div class="col-md-4">
-
-                <a
-                    href="attendance.php"
-                    class="quick-link"
-                >
-
-                    <i class="bi bi-calendar-check-fill text-success"></i>
-
-                    Manage Attendance
-
-                    <i class="bi bi-arrow-right ms-auto"></i>
-
-                </a>
-
-            </div>
-
 
             <div class="col-md-4">
 
                 <a
                     href="marks.php"
-                    class="quick-link"
+                    class="btn btn-outline-primary w-100 py-3 quick-link"
                 >
+                    <i class="bi bi-bar-chart"></i>
+                    Marks Report
+                </a>
 
-                    <i class="bi bi-bar-chart-fill text-primary"></i>
+            </div>
 
-                    Manage Marks
+            <div class="col-md-4">
 
-                    <i class="bi bi-arrow-right ms-auto"></i>
-
+                <a
+                    href="students.php"
+                    class="btn btn-outline-primary w-100 py-3 quick-link"
+                >
+                    <i class="bi bi-people"></i>
+                    Student Records
                 </a>
 
             </div>
 
         </div>
 
-    </main>
+    </div>
 
 
-    <!-- FOOTER -->
+    <footer class="text-center text-muted py-4">
 
-    <footer class="footer">
-
-        © 2026 Class Management System.
-        All rights reserved.
+        © <?= date('Y') ?> Class Management System
 
     </footer>
 
-</div>
+</main>
+
+
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+></script>
 
 </body>
 
